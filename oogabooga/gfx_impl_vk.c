@@ -22,7 +22,73 @@ typedef struct alignat(16) D3D11_Vertex {
 	
 } Vk_Vertex;
 
+// #Types
+typedef struct Vk_QueueFamilyIndices {
+	bool has_graphics;
+	uint32_t graphics;
+	
+	bool has_present;
+	uint32_t present;
+} Vk_QueueFamilyIndices;
+
+typedef struct Vk_Swapchain_Details {
+	VkSurfaceCapabilitiesKHR capabilities;
+	
+	uint32_t format_count;
+	VkSurfaceFormatKHR* formats;
+	
+	uint32_t present_mode_count;
+	VkPresentModeKHR* present_modes;
+} Vk_Swapchain_Details;
+
+typedef struct Vk_Swapchain {
+	uint32_t swapchain_image_count;
+	VkImage* swapchain_images;
+	VkFormat format;
+	VkExtent2D extent;
+	VkSwapchainKHR swapchain;
+} Vk_Swapchain;
+
+typedef struct Vk_ImageViews {
+	uint32_t view_count;
+	VkImageView* views;
+} Vk_ImageViews;
+
+typedef struct Vk_Framebuffers {
+	uint32_t count;
+	VkFramebuffer* data;
+} Vk_Framebuffers;
+
+typedef struct Vk_Data {
+	VkInstance instance;
+	VkPhysicalDevice physical_device;
+	VkDevice device;
+	VkQueue graphics_queue;
+	VkQueue present_queue;
+	VkSurfaceKHR surface;
+	Vk_QueueFamilyIndices family_indices;
+	Vk_Swapchan swapchain;
+	Vk_ImageViews image_views;
+	VkShaderModule vert_shader;
+	VkShaderModule frag_shader;
+	VkRenderPass render_pass;
+	VkPipelineLayout pipeline_layout;
+	VkPipeline pipeline;
+	vk_framebuffers_t framebuffers;
+	VkCommandPool command_pool;
+	VkBuffer vertex_buffer;
+	VkDeviceMemory vertex_buffer_mem;
+	VkCommandBuffer command_buffers[2];
+	VkSemaphore image_available[2];
+	VkSemaphore render_finished[2];
+	VkFence in_flight[2];
+	uint32_t frame;
+} Vk_Data;
+
 // #Global
+Vk_Data vk_data;
+u32 vk_swap_chain_width = 0;
+u32 vk_swap_chain_height = 0;
 
 const char* vk_stringify_severity(VkDebugUtilsMessageSeverityFlagBitsEXT severity) {
     switch (severity) {
@@ -65,251 +131,689 @@ VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_callback(VkDebugUtilsMessageSeverityFlag
 	}
 }
 
-void d3d11_update_swapchain() {
-
-	HRESULT hr;
-	bool create = !d3d11_swap_chain;
-
-	if (create) {
-		DXGI_SWAP_CHAIN_DESC1 scd = ZERO(DXGI_SWAP_CHAIN_DESC1);
-		scd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		scd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+Vk_QueueFamilyIndices vk_find_queue_family(VkPhysicalDevice device) {
+		Vk_QueueFamilyIndices indices = {0};
 		
-		//scd.BufferDesc.RefreshRate.Numerator = 0;
-		//scd.BufferDesc.RefreshRate.Denominator = 1;
+		vk_zero_check_enum(vkGetPhysicalDeviceQueueFamilyProperties, device, VkQueueFamilyProperties, queue_family);
 		
-		scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		scd.SampleDesc.Count = 1; 
-		scd.SampleDesc.Quality = 0; // #Portability
-		if (d3d11_feature_level < D3D_FEATURE_LEVEL_11_0) {
-			scd.Scaling = DXGI_SCALING_STRETCH; // for compatability with 7
+		for (uint32_t i = 0; i < queue_family_count; i++) {
+			VkBool32 present = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, vk_data.surface, &present);
+			if (present) {
+				indices.present = i;
+				indices.has_present = true;
+			}
+			if (queue_familys[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+				indices.graphics = i;
+				indices.has_graphics = true;
+			}
 		}
 		
+		free(queue_familys);
 		
-		// Windows 10 allows to use DXGI_SWAP_EFFECT_FLIP_DISCARD
-		// for Windows 8 compatibility use DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
-		// for Windows 7 compatibility use DXGI_SWAP_EFFECT_DISCARD
-		if (d3d11_feature_level >= D3D_FEATURE_LEVEL_11_0) {
-			// this is supported only on FLIP presentation model
-			scd.Scaling = DXGI_SCALING_NONE;
-			scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; 
-			scd.BufferCount = 3;
-			log_verbose("Present mode is flip discard, 3 buffers");
-		} else {
-			scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-			scd.BufferCount = 2;
-			log_verbose("Present mode is discard, 2 buffers");
-		}
-		
-		
-		// Obtain DXGI factory from device
-		IDXGIDevice *dxgi_device = 0;
-		hr = ID3D11Device_QueryInterface(d3d11_device, &IID_IDXGIDevice, cast(void**)&dxgi_device);
-		d3d11_check_hr(hr);
-		
-		IDXGIAdapter *adapter;
-		hr = IDXGIDevice_GetAdapter(dxgi_device, &adapter);
-		d3d11_check_hr(hr);
-		
-		IDXGIFactory2 *dxgi_factory;
-		hr = IDXGIAdapter_GetParent(adapter, &IID_IDXGIFactory2, cast(void**)&dxgi_factory); 
-		d3d11_check_hr(hr);
+		return indices;
+}
+
+Vk_Swapchain_Details vk_query_swapchain_details(VkPhysicalDevice device) {
+	Vk_Swapchain_Details details = {0};
 	
-		hr = IDXGIFactory2_CreateSwapChainForHwnd(dxgi_factory, (IUnknown*)d3d11_device, window._os_handle, &scd, 0, 0, &d3d11_swap_chain); 	
-		d3d11_check_hr(hr);
-		
-		RECT client_rect;
-		bool ok = GetClientRect(window._os_handle, &client_rect);
-		assert(ok, "GetClientRect failed with error code %lu", GetLastError());
-		
-		d3d11_swap_chain_width  = client_rect.right-client_rect.left;
-		d3d11_swap_chain_height = client_rect.bottom-client_rect.top;
-		
-		// store the swap chain description, as created by CreateSwapChainForHwnd
-		hr = IDXGISwapChain1_GetDesc1(d3d11_swap_chain, &d3d11_swap_chain_desc);
-		d3d11_check_hr(hr);
-		
-		// disable alt enter
-		IDXGIFactory_MakeWindowAssociation(dxgi_factory, window._os_handle, cast (u32) DXGI_MWA_NO_ALT_ENTER); 
-		
-		IDXGIDevice_Release(dxgi_device);
-		IDXGIAdapter_Release(adapter);
-		IDXGIFactory_Release(dxgi_factory);
-		
-		log("Created swap chain of size %dx%d", d3d11_swap_chain_width, d3d11_swap_chain_height);
-	} else {
-		if (d3d11_window_render_target_view) D3D11Release(d3d11_window_render_target_view);
-		if (d3d11_back_buffer) D3D11Release(d3d11_back_buffer);
-		
-		RECT client_rect;
-		bool ok = GetClientRect(window._os_handle, &client_rect);
-		assert(ok, "GetClientRect failed with error code %lu", GetLastError());
-		
-		u32 window_width  = client_rect.right-client_rect.left;
-		u32 window_height = client_rect.bottom-client_rect.top;
-		
-		hr = IDXGISwapChain1_ResizeBuffers(d3d11_swap_chain, d3d11_swap_chain_desc.BufferCount, window_width, window_height, d3d11_swap_chain_desc.Format, d3d11_swap_chain_desc.Flags);
-		d3d11_check_hr(hr);
-		
-		// update swap chain description
-		hr = IDXGISwapChain1_GetDesc1(d3d11_swap_chain, &d3d11_swap_chain_desc);
-		d3d11_check_hr(hr);
-		
-		log("Resized swap chain from %dx%d to %dx%d", d3d11_swap_chain_width, d3d11_swap_chain_height, window_width, window_height);
-		
-		d3d11_swap_chain_width  = window_width;
-		d3d11_swap_chain_height = window_height;
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, vk_data.surface, &details.capabilities);
+	
+	vk_zero_check_enum_2(vkGetPhysicalDeviceSurfaceFormatsKHR, device, vk_data.surface, VkSurfaceFormatKHR, format);
+	
+	details.format_count = format_count;
+	details.formats = formats;
+	
+	vk_zero_check_enum_2(vkGetPhysicalDeviceSurfacePresentModesKHR, device, vk_data.surface, VkPresentModeKHR, present_mode);
+	
+	details.present_mode_count = present_mode_count;
+	details.present_modes = present_modes;
+	
+	return details;
+}
+
+VkSurfaceFormatKHR vk_get_surface_format(Vk_Swapchain_Details details) {
+	for (uint32_t i = 0; i < details.format_count; i++) {
+		if (details.formats[i].format == VK_FORMAT_B8G8R8A8_SRGB && details.formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+			return details.formats[i];
+		}
+	}
+	vk(VK_ERROR_UNKNOWN);
+	return details.formats[0]; // unreached
+}
+
+VkPresentModeKHR vk_get_present_mode(Vk_Swapchain_Details details) {
+	for (uint32_t i = 0; i < details.present_mode_count; i++) {
+		if (details.present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
+			return details.present_modes[i];
 	}
 	
+	return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+VkInstance vk_create_instance(void) {
+	VkApplicationInfo appinfo = {
+		.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+		.pApplicationName = "vktest",
+		.applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+		.pEngineName = "vktest",
+		.engineVersion = VK_MAKE_VERSION(1, 0, 0),
+		.apiVersion = VK_API_VERSION_1_0,
+	};
 	
+	const char* instance_extensions[] = {
+		"VK_KHR_surface", "VK_KHR_win32_surface",
+	};
 	
+	VkInstanceCreateInfo createinfo = {
+		.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+		.pApplicationInfo = &appinfo,
+		.enabledExtensionCount = 2,
+		.ppEnabledExtensionNames = instance_extensions,
+	};
 	
-	hr = IDXGISwapChain1_GetBuffer(d3d11_swap_chain, 0, &IID_ID3D11Texture2D, (void**)&d3d11_back_buffer);
-	d3d11_check_hr(hr);
-	hr = ID3D11Device_CreateRenderTargetView(d3d11_device, (ID3D11Resource*)d3d11_back_buffer, 0, &d3d11_window_render_target_view); 
-	d3d11_check_hr(hr);
+	VkInstance r;
+	vk(vkCreateInstance(&createinfo, NULL, &r));
+	return r;
+}
+
+VkPhysicalDevice vk_create_physical_device(void) {
+	vk_zero_check_enum(vkEnumeratePhysicalDevices, vk_data.instance, VkPhysicalDevice, device);
+	
+	// just choose the last discrete device, or the last overall device if there is no discrete device
+	
+	uint32_t chosen_device = 0;
+	bool has_chosen = false;
+	for (uint32_t i = 0; i < device_count; i++) {
+		VkPhysicalDeviceProperties props;
+		vkGetPhysicalDeviceProperties(devices[i], &props);
+		
+		if (vk_find_queue_family(devices[chosen_device]).has_graphics) {
+			has_chosen = true;
+			chosen_device = i;
+		}
+		
+		if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+			chosen_device = i;
+			break;
+		}
+	}
+	Vk_QueueFamilyIndices indices = vk_find_queue_family(devices[chosen_device]);
+	if (!indices.has_graphics) vk(VK_ERROR_UNKNOWN);
+	if (!indices.has_present) vk(VK_ERROR_UNKNOWN);
+	
+	VkPhysicalDevice r = devices[chosen_device];
+	
+	free(devices);
+	
+	return r;
+}
+
+VkDevice vk_create_logical_device(void) {
+	Vk_QueueFamilyIndices indices = vk_find_queue_family(vk_data.physical_device);
+	
+	float queue_priority = 1.0f;
+	
+	VkDeviceQueueCreateInfo queue_createinfo[] = {
+		{
+			.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+			.queueFamilyIndex = indices.graphics,
+			.queueCount = 1,
+			.pQueuePriorities = &queue_priority,
+		},
+		{
+			.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+			.queueFamilyIndex = indices.present,
+			.queueCount = 1,
+			.pQueuePriorities = &queue_priority,
+		}
+	};
+	
+	VkPhysicalDeviceFeatures device_features = {0};
+	
+	const char* device_extensions[] = {
+		"VK_KHR_swapchain"
+	};
+	
+	VkDeviceCreateInfo device_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+		.pQueueCreateInfos = queue_createinfo,
+		.queueCreateInfoCount = 1,
+		.pEnabledFeatures = &device_features,
+		.enabledExtensionCount = 1,
+		.ppEnabledExtensionNames = device_extensions,
+	};
+	
+	if (indices.graphics == indices.present)
+		device_createinfo.queueCreateInfoCount = 1;
+	else
+		device_createinfo.queueCreateInfoCount = 2;
+	
+	VkDevice r;
+	
+	vk(vkCreateDevice(vk_data.physical_device, &device_createinfo, NULL, &r));
+	
+	return r;
+}
+
+VkQueue vk_create_queue(uint32_t family) {
+	VkQueue r;
+	vkGetDeviceQueue(vk_data.device, family, 0, &r);
+	return r;
+}
+
+VkSurfaceKHR vk_create_surface(void* hWnd, void* hInstance) {
+	VkWin32SurfaceCreateInfoKHR surface_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+		.hwnd = hWnd,
+		.hinstance = hInstance,
+	};
+	
+	VkSurfaceKHR r;
+	vk(vkCreateWin32SurfaceKHR(vk_data.instance, &surface_createinfo, NULL, &r));
+	return r;
+}
+
+Vk_Swapchan vk_create_swapchain(uint32_t w, uint32_t h, Vk_QueueFamilyIndices indices) {
+	Vk_Swapchain_Details details = vk_query_swapchain_details(vk_data.physical_device);
+	
+	VkSurfaceFormatKHR format = vk_get_surface_format(details);
+	VkPresentModeKHR present_mode = vk_get_present_mode(details);
+	VkExtent2D extent = { w, h };
+	
+	uint32_t image_count = details.capabilities.minImageCount + 1;
+	if (details.capabilities.maxImageCount > 0 && image_count > details.capabilities.maxImageCount)
+		image_count = details.capabilities.maxImageCount;
+	
+	VkSwapchainCreateInfoKHR createinfo = {
+		.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+		.surface = vk_data.surface,
+		.minImageCount = image_count,
+		.imageFormat = format.format,
+		.imageColorSpace = format.colorSpace,
+		.imageExtent = extent,
+		.imageArrayLayers = 1,
+		.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		.preTransform = details.capabilities.currentTransform,
+		.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+		.presentMode = present_mode,
+		.clipped = VK_TRUE,
+		.oldSwapchain = VK_NULL_HANDLE,
+	};
+	
+	uint32_t family_indices[] = { indices.graphics, indices.present };
+	
+	if (indices.graphics == indices.present) {
+		createinfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	} else {
+		createinfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+		createinfo.queueFamilyIndexCount = 2;
+		createinfo.pQueueFamilyIndices = family_indices;
+	}
+	
+	Vk_Swapchan r;
+	vk(vkCreateSwapchainKHR(vk_data.device, &createinfo, NULL, &r.swapchain));
+	
+	free(details.formats);
+	free(details.present_modes);
+	
+	r.format = format.format;
+	r.extent = extent;
+	
+	vkGetSwapchainImagesKHR(vk_data.device, r.swapchain, &r.swapchain_image_count, NULL);
+	r.swapchain_images = malloc(r.swapchain_image_count * sizeof(VkImage));
+	vkGetSwapchainImagesKHR(vk_data.device, r.swapchain, &r.swapchain_image_count, r.swapchain_images);
+	
+	return r;
+}
+
+Vk_ImageViews vk_create_image_views(void) {
+	Vk_ImageViews r;
+	r.view_count = vk_data.swapchain.swapchain_image_count;
+	r.views = malloc(r.view_count * sizeof(VkImageView));
+	
+	for (uint32_t i = 0; i < r.view_count; i++) {
+		VkImageViewCreateInfo createinfo = {
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = vk_data.swapchain.swapchain_images[i],
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = vk_data.swapchain.format,
+			.components = { VK_COMPONENT_SWIZZLE_IDENTITY },
+			.subresourceRange = {
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1,
+			},
+		};
+		
+		vk(vkCreateImageView(vk_data.device, &createinfo, NULL, &r.views[i]));
+	}
+	
+	return r;
+}
+
+VkShaderModule vk_create_shader(void* data, u32 length) {
+	VkShaderModuleCreateInfo createinfo = {
+		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		.codeSize = length,
+		.pCode = (const uint32_t*)data,
+	};
+	
+	VkShaderModule r;
+	vk(vkCreateShaderModule(vk_data.device, &createinfo, NULL, &r));
+	
+	return r;
+}
+
+VkPipeline vk_create_graphics_pipeline(void) {
+	VkPipelineShaderStageCreateInfo vert_shader_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+		.stage = VK_SHADER_STAGE_VERTEX_BIT,
+		.module = vk_data.vert_shader,
+		.pName = "main",
+	};
+	
+	VkPipelineShaderStageCreateInfo frag_shader_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+		.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+		.module = vk_data.frag_shader,
+		.pName = "main",
+	};
+	
+	VkPipelineShaderStageCreateInfo stages[] = { vert_shader_createinfo, frag_shader_createinfo };
+	
+	VkDynamicState states[] = {
+		VK_DYNAMIC_STATE_VIEWPORT,
+		VK_DYNAMIC_STATE_SCISSOR,
+	};
+	
+	VkPipelineDynamicStateCreateInfo state_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		.dynamicStateCount = 2,
+		.pDynamicStates = states,
+	};
+	
+	VkVertexInputBindingDescription vertex_input_binding_desc = {
+		.binding = 0,
+		.stride = sizeof(vk_vertex),
+		.inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+	};
+	
+	VkVertexInputAttributeDescription vertex_input_attrs[2] = {
+		{
+			.binding = 0,
+			.location = 0,
+			.format = VK_FORMAT_R32G32_SFLOAT,
+			.offset = offsetof(vk_vertex, pos),
+		},
+		{
+			.binding = 0,
+			.location = 1,
+			.format = VK_FORMAT_R32G32B32_SFLOAT,
+			.offset = offsetof(vk_vertex, color),
+		},
+	};
+	
+	VkPipelineVertexInputStateCreateInfo vertex_input_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		.vertexBindingDescriptionCount = 1,
+		.pVertexBindingDescriptions = &vertex_input_binding_desc,
+		.vertexAttributeDescriptionCount = 2,
+		.pVertexAttributeDescriptions = vertex_input_attrs,
+	};
+	
+	VkPipelineInputAssemblyStateCreateInfo input_assembly_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+		.primitiveRestartEnable = VK_FALSE,
+	};
+	
+	VkViewport viewport = {
+		.x = 0.0f,
+		.y = 0.0f,
+		.width = vk_data.swapchain.extent.width,
+		.height = vk_data.swapchain.extent.height,
+		.minDepth = 0.0f,
+		.maxDepth = 1.0f,
+	};
+	
+	VkRect2D scissor = {
+		.offset = { 0, 0 },
+		.extent = vk_data.swapchain.extent,
+	};
+	
+	VkPipelineViewportStateCreateInfo viewport_state_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		.viewportCount = 1,
+		.pViewports = &viewport,
+		.scissorCount = 1,
+		.pScissors = &scissor,
+	};
+	
+	VkPipelineRasterizationStateCreateInfo rasterization_state_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		.depthClampEnable = VK_FALSE,
+		.rasterizerDiscardEnable = VK_FALSE,
+		.polygonMode = VK_POLYGON_MODE_FILL,
+		.lineWidth = 1.0f,
+		.cullMode = VK_CULL_MODE_BACK_BIT,
+		.frontFace = VK_FRONT_FACE_CLOCKWISE,
+		.depthBiasEnable = VK_FALSE,
+	};
+	
+	VkPipelineMultisampleStateCreateInfo sampling_state_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		.sampleShadingEnable = VK_FALSE,
+		.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+		.minSampleShading = 1.0f,
+		.pSampleMask = NULL,
+		.alphaToCoverageEnable = VK_FALSE,
+		.alphaToOneEnable = VK_FALSE,
+	};
+	
+	VkPipelineColorBlendAttachmentState blend_attachment = {
+		.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+		.blendEnable = VK_FALSE,
+	};
+	
+	VkPipelineColorBlendStateCreateInfo blend_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		.logicOpEnable = VK_FALSE,
+		.attachmentCount = 1,
+		.pAttachments = &blend_attachment,
+	};
+	
+	VkGraphicsPipelineCreateInfo pipeline_create_info = {
+		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+		.stageCount = 2,
+		.pStages = stages,
+		.pVertexInputState = &vertex_input_createinfo,
+		.pInputAssemblyState = &input_assembly_createinfo,
+		.pViewportState = &viewport_state_createinfo,
+		.pRasterizationState = &rasterization_state_createinfo,
+		.pMultisampleState = &sampling_state_createinfo,
+		.pDepthStencilState = NULL,
+		.pColorBlendState = &blend_createinfo,
+		.pDynamicState = &state_createinfo,
+		.layout = vk_data.pipeline_layout,
+		.renderPass = vk_data.render_pass,
+		.subpass = 0,
+		.basePipelineHandle = VK_NULL_HANDLE,
+		.basePipelineIndex = -1,
+	};
+	
+	VkPipeline r;
+	vk(vkCreateGraphicsPipelines(vk_data.device, VK_NULL_HANDLE, 1, &pipeline_create_info, NULL, &r));
+	return r;
+}
+
+VkPipelineLayout vk_create_pipeline_layout(void) {
+	VkPipelineLayoutCreateInfo layout_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+	};
+	
+	VkPipelineLayout r;
+	vk(vkCreatePipelineLayout(vk_data.device, &layout_createinfo, NULL, &r));
+	return r;
+}
+
+VkRenderPass vk_create_render_pass(void) {
+	VkAttachmentDescription color = {
+		.format = vk_data.swapchain.format,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+		.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+		.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+	};
+	
+	VkAttachmentReference reference = {
+		.attachment = 0,
+		.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	};
+	
+	VkSubpassDescription subpass = {
+		.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+		.colorAttachmentCount = 1,
+		.pColorAttachments = &reference,
+	};
+	
+	VkSubpassDependency dependency = {
+		.srcSubpass = VK_SUBPASS_EXTERNAL,
+		.dstSubpass = 0,
+		.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.srcAccessMask = 0,
+	};
+	
+	VkRenderPassCreateInfo render_pass_create_info = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+		.attachmentCount = 1,
+		.pAttachments = &color,
+		.subpassCount = 1,
+		.pSubpasses = &subpass,
+		.dependencyCount = 1,
+		.pDependencies = &dependency,
+	};
+	
+	VkRenderPass r;
+	vk(vkCreateRenderPass(vk_data.device, &render_pass_create_info, NULL, &r));
+	return r;
+}
+
+vk_framebuffers_t vk_create_framebuffers(void) {
+	vk_framebuffers_t r;
+	r.count = vk_data.image_views.view_count;
+	r.data = malloc(sizeof(VkFramebuffer) * r.count);
+	
+	for (uint32_t i = 0; i < r.count; i++) {
+		VkImageView attachments[] = {
+			vk_data.image_views.views[i]
+		};
+		
+		VkFramebufferCreateInfo framebuffer_createinfo = {
+			.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+			.renderPass = vk_data.render_pass,
+			.attachmentCount = 1,
+			.pAttachments = attachments,
+			.width = vk_data.swapchain.extent.width,
+			.height = vk_data.swapchain.extent.height,
+			.layers = 1,
+		};
+		
+		vk(vkCreateFramebuffer(vk_data.device, &framebuffer_createinfo, NULL, &r.data[i]));
+	}
+	
+	return r;
+}
+
+VkCommandPool vk_create_command_pool(Vk_QueueFamilyIndices indices) {
+	VkCommandPoolCreateInfo pool_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+		.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+		.queueFamilyIndex = indices.graphics,
+	};
+	
+	VkCommandPool r;
+	vk(vkCreateCommandPool(vk_data.device, &pool_createinfo, NULL, &r));
+	return r;
+}
+
+uint32_t vk_find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags props) {
+	VkPhysicalDeviceMemoryProperties mem_props;
+	vkGetPhysicalDeviceMemoryProperties(vk_data.physical_device, &mem_props);
+	
+	for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+		if ((type_filter & (1 << i)) && (mem_props.memoryTypes[i].propertyFlags & props) == props) {
+			return i;
+		}
+	}
+	
+	vk(VK_ERROR_UNKNOWN);
+	return 0;
+}
+
+VkBuffer vk_create_vertex_buffer(void) {
+	VkBufferCreateInfo buffer_createinfo = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size = sizeof(verts[0]) * vert_count,
+		.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	};
+	
+	VkBuffer r;
+	vk(vkCreateBuffer(vk_data.device, &buffer_createinfo, NULL, &r));
+	return r;
+}
+
+VkDeviceMemory vk_alloc_buffer_mem(VkBuffer buffer) {
+	VkMemoryRequirements mem_reqs;
+	vkGetBufferMemoryRequirements(vk_data.device, buffer, &mem_reqs);
+	
+	VkMemoryAllocateInfo allocinfo = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = mem_reqs.size,
+		.memoryTypeIndex = vk_find_memory_type(mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+	};
+	
+	VkDeviceMemory r;
+	vk(vkAllocateMemory(vk_data.device, &allocinfo, NULL, &r));
+	
+	vkBindBufferMemory(vk_data.device, buffer, r, 0);
+	
+	return r;
+}
+
+void vk_buffer_set_data(VkDeviceMemory mem, void* data, size_t len) {
+	void* dst;
+	vkMapMemory(vk_data.device, mem, 0, len, 0, &dst);
+	memcpy(dst, data, len);
+	vkUnmapMemory(vk_data.device, mem);
+}
+
+VkCommandBuffer vk_create_command_buffer(void) {
+	VkCommandBufferAllocateInfo allocinfo = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		.commandPool = vk_data.command_pool,
+		.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		.commandBufferCount = 1,
+	};
+	
+	VkCommandBuffer r;
+	vk(vkAllocateCommandBuffers(vk_data.device, &allocinfo, &r));
+	return r;
+}
+
+void vk_record(VkCommandBuffer command_buffer, uint32_t index) {
+	VkCommandBufferBeginInfo begin_info = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+		.flags = 0,
+		.pInheritanceInfo = NULL,
+	};
+	
+	vk(vkBeginCommandBuffer(command_buffer, &begin_info));
+	
+	VkClearValue clear_color = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+	VkRenderPassBeginInfo render_pass_info = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		.renderPass = vk_data.render_pass,
+		.framebuffer = vk_data.framebuffers.data[index],
+		.renderArea = {
+			.offset = { 0, 0 },
+			.extent = vk_data.swapchain.extent,
+		},
+		.clearValueCount = 1,
+		.pClearValues = &clear_color,
+	};
+	
+	vkCmdBeginRenderPass(command_buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+	
+	vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_data.pipeline);
+	
+	VkViewport viewport = {
+		.x = 0.0f,
+		.y = 0.0f,
+		.width = vk_data.swapchain.extent.width,
+		.height = vk_data.swapchain.extent.height,
+		.minDepth = 0.0f,
+		.maxDepth = 1.0f,
+	};
+	
+	VkRect2D scissor = {
+		.offset = { 0, 0 },
+		.extent = vk_data.swapchain.extent,
+	};
+	
+	vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+	vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+	
+	VkDeviceSize offsets[] = {0};
+	vkCmdBindVertexBuffers(command_buffer, 0, 1, &vk_data.vertex_buffer, offsets);
+	
+	vkCmdDraw(command_buffer, 3, 1, 0, 0);
+	
+	vkCmdEndRenderPass(command_buffer);
+	vk(vkEndCommandBuffer(command_buffer));
+}
+
+VkSemaphore vk_create_semaphore(void) {
+	VkSemaphoreCreateInfo createinfo = {
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+	};
+	
+	VkSemaphore r;
+	vk(vkCreateSemaphore(vk_data.device, &createinfo, NULL, &r));
+	return r;
+}
+
+VkFence vk_create_fence(bool signaled) {
+	VkFenceCreateInfo createinfo = {
+		.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+		.flags = signaled ? VK_FENCE_CREATE_SIGNALED_BIT : 0,
+	};
+	
+	VkFence r;
+	vk(vkCreateFence(vk_data.device, &createinfo, NULL, &r));
+	return r;
+}
+
+void vk_update_swapchain() {
+	bool create = !vk_data.swapchain.swapchain;
+
+	if (create) {
+		panic("vk_update_swapchain called before initialization");
+	} else {
+		vkDeviceWaitIdle(vk_data.device);
+		
+		for (uint32_t i = 0; i < vk_data.framebuffers.count; i++) {
+			vkDestroyFramebuffer(vk_data.device, vk_data.framebuffers.data[i], NULL);
+		}
+		for (uint32_t i = 0; i < vk_data.image_views.view_count; i++) {
+			vkDestroyImageView(vk_data.device, vk_data.image_views.views[i], NULL);
+		}
+		vkDestroySwapchainKHR(vk_data.device, vk_data.swapchain.swapchain, NULL);
+		
+		RECT client_rect;
+		bool ok = GetClientRect(window._os_handle, &client_rect);
+		assert(ok, "GetClientRect failed with error code %lu", GetLastError());
+		
+		vk_swap_chain_width  = client_rect.right-client_rect.left;
+		vk_swap_chain_height = client_rect.bottom-client_rect.top;
+		
+		vk_data.swapchain = vk_create_swapchain(vk_swap_chain_width, vk_swap_chain_height, vk_data.family_indices);
+		vk_data.image_views = vk_create_image_views();
+		vk_data.framebuffers = vk_create_framebuffers();
+	}
 }
 
 bool
-d3d11_compile_shader(string source) {
-
-	source = string_replace_all(source, STR("$INJECT_PIXEL_POST_PROCESS"), STR("float4 pixel_shader_extension(PS_INPUT input, float4 color) { return color; }"), get_temporary_allocator());
-	source = string_replace_all(source, STR("$VERTEX_2D_USER_DATA_COUNT"), tprint("%d", VERTEX_2D_USER_DATA_COUNT), get_temporary_allocator());
+vk_compile_shader(string file) {
 	
-	// #Leak on recompile
-	
-	///
-	// Make default shaders
-	
-	// Compile vertex shader
-    ID3DBlob* vs_blob = NULL;
-    ID3DBlob* err_blob = NULL;
-    HRESULT hr = D3DCompile((char*)source.data, source.count, 0, 0, 0, "vs_main", "vs_5_0", 0, 0, &vs_blob, &err_blob);
-	if (!SUCCEEDED(hr)) {
-		log_error("Vertex Shader Compilation Error: %cs\n", (char*)ID3D10Blob_GetBufferPointer(err_blob));
-		return false;
-	}
-
-    // Compile pixel shader
-    ID3DBlob* ps_blob = NULL;
-    hr = D3DCompile((char*)source.data, source.count, 0, 0, 0, "ps_main", "ps_5_0", 0, 0, &ps_blob, &err_blob);
-	if (!SUCCEEDED(hr)) {
-		log_error("Fragment Shader Compilation Error: %cs\n", (char*)ID3D10Blob_GetBufferPointer(err_blob));
-		return false;
-	}
-
-	void *vs_buffer = ID3D10Blob_GetBufferPointer(vs_blob);
-	u64   vs_size   = ID3D10Blob_GetBufferSize(vs_blob);
-	void *ps_buffer = ID3D10Blob_GetBufferPointer(ps_blob);
-	u64   ps_size   = ID3D10Blob_GetBufferSize(ps_blob);
-
-    log_verbose("Shaders compiled");
-    
-    
-    // Create the shaders
-    hr = ID3D11Device_CreateVertexShader(d3d11_device, vs_buffer, vs_size, NULL, &d3d11_vertex_shader_for_2d);
-    d3d11_check_hr(hr);
-
-    hr = ID3D11Device_CreatePixelShader(d3d11_device, ps_buffer, ps_size, NULL, &d3d11_fragment_shader_for_2d);
-    d3d11_check_hr(hr);
-
-    log_verbose("Shaders created");
-
-
-
-	#define layout_base_count 9
-	D3D11_INPUT_ELEMENT_DESC layout[layout_base_count+VERTEX_2D_USER_DATA_COUNT];
-	memset(layout, 0, sizeof(layout));
-	
-	layout[0].SemanticName = "POSITION";
-	layout[0].SemanticIndex = 0;
-	layout[0].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-	layout[0].InputSlot = 0;
-	layout[0].AlignedByteOffset = offsetof(D3D11_Vertex, position);
-	layout[0].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[0].InstanceDataStepRate = 0;
-	
-	layout[1].SemanticName = "TEXCOORD";
-	layout[1].SemanticIndex = 0;
-	layout[1].Format = DXGI_FORMAT_R32G32_FLOAT;
-	layout[1].InputSlot = 0;
-	layout[1].AlignedByteOffset = offsetof(D3D11_Vertex, uv);
-	layout[1].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[1].InstanceDataStepRate = 0;
-	
-	layout[2].SemanticName = "COLOR";
-	layout[2].SemanticIndex = 0;
-	layout[2].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-	layout[2].InputSlot = 0;
-	layout[2].AlignedByteOffset = offsetof(D3D11_Vertex, color);
-	layout[2].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[2].InstanceDataStepRate = 0;
-	
-	layout[3].SemanticName = "TEXTURE_INDEX";
-	layout[3].SemanticIndex = 0;
-	layout[3].Format = DXGI_FORMAT_R8_SINT;
-	layout[3].InputSlot = 0;
-	layout[3].AlignedByteOffset = offsetof(D3D11_Vertex, texture_index);
-	layout[3].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[3].InstanceDataStepRate = 0;
-	
-	layout[4].SemanticName = "TYPE";
-	layout[4].SemanticIndex = 0;
-	layout[4].Format = DXGI_FORMAT_R8_UINT;
-	layout[4].InputSlot = 0;
-	layout[4].AlignedByteOffset = offsetof(D3D11_Vertex, type);
-	layout[4].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[4].InstanceDataStepRate = 0;
-	
-	layout[5].SemanticName = "SAMPLER_INDEX";
-	layout[5].SemanticIndex = 0;
-	layout[5].Format = DXGI_FORMAT_R8_SINT;
-	layout[5].InputSlot = 0;
-	layout[5].AlignedByteOffset = offsetof(D3D11_Vertex, sampler);
-	layout[5].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[5].InstanceDataStepRate = 0;
-	
-	layout[6].SemanticName = "SELF_UV";
-	layout[6].SemanticIndex = 0;
-	layout[6].Format = DXGI_FORMAT_R32G32_FLOAT;
-	layout[6].InputSlot = 0;
-	layout[6].AlignedByteOffset = offsetof(D3D11_Vertex, self_uv);
-	layout[6].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[6].InstanceDataStepRate = 0;
-	
-	layout[7].SemanticName = "SCISSOR";
-	layout[7].SemanticIndex = 0;
-	layout[7].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-	layout[7].InputSlot = 0;
-	layout[7].AlignedByteOffset = offsetof(D3D11_Vertex, scissor);
-	layout[7].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[7].InstanceDataStepRate = 0;
-	
-	layout[8].SemanticName = "HAS_SCISSOR";
-	layout[8].SemanticIndex = 0;
-	layout[8].Format = DXGI_FORMAT_R8_UINT;
-	layout[8].InputSlot = 0;
-	layout[8].AlignedByteOffset = offsetof(D3D11_Vertex, has_scissor);
-	layout[8].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	layout[8].InstanceDataStepRate = 0;
-	
-	for (int i = 0; i < VERTEX_2D_USER_DATA_COUNT; ++i) {
-	    layout[layout_base_count + i].SemanticName = "USERDATA";
-	    layout[layout_base_count + i].SemanticIndex = i;
-	    layout[layout_base_count + i].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-	    layout[layout_base_count + i].InputSlot = 0;
-	    layout[layout_base_count + i].AlignedByteOffset = offsetof(D3D11_Vertex, userdata) + sizeof(Vector4) * i;
-	    layout[layout_base_count + i].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-	}
-	
-	
-	hr = ID3D11Device_CreateInputLayout(d3d11_device, layout, layout_base_count+VERTEX_2D_USER_DATA_COUNT, vs_buffer, vs_size, &d3d11_image_vertex_layout);
-	d3d11_check_hr(hr);
-	
-	#undef layout_base_count
-
-	D3D11Release(vs_blob);
-    D3D11Release(ps_blob);
+	vk_data.vert_shader = vk_create_shader("monke.vert.spv");
+	vk_data.frag_shader = vk_create_shader("monke.frag.spv");
 
 	return true;
 }
@@ -903,252 +1407,218 @@ shader_recompile_with_extension(string ext_source, u64 cbuffer_size) {
 	
 	return true;
 }
-    
-    
 
-const char *d3d11_image_shader_source = RAW_STRING(
-	
-struct VS_INPUT
-{
-    float4 position : POSITION;
-    float2 uv : TEXCOORD;
-    float2 self_uv : SELF_UV;
-    float4 color : COLOR;
-    int texture_index : TEXTURE_INDEX;
-    uint type : TYPE;
-    uint sampler_index : SAMPLER_INDEX;
-    uint has_scissor : HAS_SCISSOR;
-    float4 userdata[$VERTEX_2D_USER_DATA_COUNT] : USERDATA;
-    float4 scissor : SCISSOR;
+const u64 vk_image_shader_vert_size = 1080;
+const u8* vk_image_shader_vert = {
+		0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 
+	0x0b, 0x00, 0x0d, 0x00, 0x21, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x06, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x47, 0x4c, 0x53, 0x4c, 
+	0x2e, 0x73, 0x74, 0x64, 0x2e, 0x34, 0x35, 0x30, 
+	0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x03, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
+	0x0f, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69, 0x6e, 
+	0x00, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 
+	0x12, 0x00, 0x00, 0x00, 0x1d, 0x00, 0x00, 0x00, 
+	0x1f, 0x00, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 
+	0x02, 0x00, 0x00, 0x00, 0xc2, 0x01, 0x00, 0x00, 
+	0x04, 0x00, 0x0a, 0x00, 0x47, 0x4c, 0x5f, 0x47, 
+	0x4f, 0x4f, 0x47, 0x4c, 0x45, 0x5f, 0x63, 0x70, 
+	0x70, 0x5f, 0x73, 0x74, 0x79, 0x6c, 0x65, 0x5f, 
+	0x6c, 0x69, 0x6e, 0x65, 0x5f, 0x64, 0x69, 0x72, 
+	0x65, 0x63, 0x74, 0x69, 0x76, 0x65, 0x00, 0x00, 
+	0x04, 0x00, 0x08, 0x00, 0x47, 0x4c, 0x5f, 0x47, 
+	0x4f, 0x4f, 0x47, 0x4c, 0x45, 0x5f, 0x69, 0x6e, 
+	0x63, 0x6c, 0x75, 0x64, 0x65, 0x5f, 0x64, 0x69, 
+	0x72, 0x65, 0x63, 0x74, 0x69, 0x76, 0x65, 0x00, 
+	0x05, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 
+	0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00, 
+	0x05, 0x00, 0x06, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x67, 0x6c, 0x5f, 0x50, 0x65, 0x72, 0x56, 0x65, 
+	0x72, 0x74, 0x65, 0x78, 0x00, 0x00, 0x00, 0x00, 
+	0x06, 0x00, 0x06, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f, 0x50, 
+	0x6f, 0x73, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x00, 
+	0x06, 0x00, 0x07, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f, 0x50, 
+	0x6f, 0x69, 0x6e, 0x74, 0x53, 0x69, 0x7a, 0x65, 
+	0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x07, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 
+	0x67, 0x6c, 0x5f, 0x43, 0x6c, 0x69, 0x70, 0x44, 
+	0x69, 0x73, 0x74, 0x61, 0x6e, 0x63, 0x65, 0x00, 
+	0x06, 0x00, 0x07, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f, 0x43, 
+	0x75, 0x6c, 0x6c, 0x44, 0x69, 0x73, 0x74, 0x61, 
+	0x6e, 0x63, 0x65, 0x00, 0x05, 0x00, 0x03, 0x00, 
+	0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x05, 0x00, 0x05, 0x00, 0x12, 0x00, 0x00, 0x00, 
+	0x69, 0x6e, 0x50, 0x6f, 0x73, 0x69, 0x74, 0x69, 
+	0x6f, 0x6e, 0x00, 0x00, 0x05, 0x00, 0x05, 0x00, 
+	0x1d, 0x00, 0x00, 0x00, 0x66, 0x72, 0x61, 0x67, 
+	0x43, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x00, 0x00, 
+	0x05, 0x00, 0x04, 0x00, 0x1f, 0x00, 0x00, 0x00, 
+	0x69, 0x6e, 0x43, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 
+	0x47, 0x00, 0x03, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x02, 0x00, 0x00, 0x00, 0x48, 0x00, 0x05, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x48, 0x00, 0x05, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x48, 0x00, 0x05, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 
+	0x48, 0x00, 0x05, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 
+	0x04, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 
+	0x12, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 
+	0x1d, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 
+	0x1f, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x13, 0x00, 0x02, 0x00, 
+	0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x03, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 
+	0x16, 0x00, 0x03, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x20, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 
+	0x07, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x04, 0x00, 0x00, 0x00, 0x15, 0x00, 0x04, 0x00, 
+	0x08, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 
+	0x08, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x04, 0x00, 
+	0x0a, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x09, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x06, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 
+	0x06, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 
+	0x0a, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04, 0x00, 
+	0x0c, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x04, 0x00, 
+	0x0c, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x15, 0x00, 0x04, 0x00, 
+	0x0e, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 
+	0x0e, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 
+	0x10, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x02, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04, 0x00, 
+	0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
+	0x10, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x04, 0x00, 
+	0x11, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 
+	0x06, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 
+	0x06, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x80, 0x3f, 0x20, 0x00, 0x04, 0x00, 
+	0x19, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 
+	0x07, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 
+	0x1b, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04, 0x00, 
+	0x1c, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 
+	0x1b, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x04, 0x00, 
+	0x1c, 0x00, 0x00, 0x00, 0x1d, 0x00, 0x00, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04, 0x00, 
+	0x1e, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
+	0x1b, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x04, 0x00, 
+	0x1e, 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x36, 0x00, 0x05, 0x00, 
+	0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 
+	0xf8, 0x00, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 
+	0x3d, 0x00, 0x04, 0x00, 0x10, 0x00, 0x00, 0x00, 
+	0x13, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 
+	0x51, 0x00, 0x05, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x16, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x51, 0x00, 0x05, 0x00, 
+	0x06, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00, 
+	0x13, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
+	0x50, 0x00, 0x07, 0x00, 0x07, 0x00, 0x00, 0x00, 
+	0x18, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 
+	0x17, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 
+	0x15, 0x00, 0x00, 0x00, 0x41, 0x00, 0x05, 0x00, 
+	0x19, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 
+	0x0d, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 
+	0x3e, 0x00, 0x03, 0x00, 0x1a, 0x00, 0x00, 0x00, 
+	0x18, 0x00, 0x00, 0x00, 0x3d, 0x00, 0x04, 0x00, 
+	0x1b, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 
+	0x1f, 0x00, 0x00, 0x00, 0x3e, 0x00, 0x03, 0x00, 
+	0x1d, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 
+	0xfd, 0x00, 0x01, 0x00, 0x38, 0x00, 0x01, 0x00, 
 };
 
-struct PS_INPUT
-{
-    float4 position_screen : SV_POSITION;
-    float4 position : POSITION;
-    float2 uv : TEXCOORD0;
-    float2 self_uv : SELF_UV;
-    float4 color : COLOR;
-    int texture_index: TEXTURE_INDEX;
-    int type: TYPE;
-    int sampler_index: SAMPLER_INDEX;
-    uint has_scissor : HAS_SCISSOR;
-    float4 userdata[$VERTEX_2D_USER_DATA_COUNT] : USERDATA;
-    float4 scissor : SCISSOR;
+const u64 vk_image_shader_frag_size = 572;
+const u8* vk_image_shader_frag = {
+	0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 
+	0x0b, 0x00, 0x0d, 0x00, 0x13, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x06, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x47, 0x4c, 0x53, 0x4c, 
+	0x2e, 0x73, 0x74, 0x64, 0x2e, 0x34, 0x35, 0x30, 
+	0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x03, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
+	0x0f, 0x00, 0x07, 0x00, 0x04, 0x00, 0x00, 0x00, 
+	0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69, 0x6e, 
+	0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 
+	0x0c, 0x00, 0x00, 0x00, 0x10, 0x00, 0x03, 0x00, 
+	0x04, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 
+	0x03, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 
+	0xc2, 0x01, 0x00, 0x00, 0x04, 0x00, 0x0a, 0x00, 
+	0x47, 0x4c, 0x5f, 0x47, 0x4f, 0x4f, 0x47, 0x4c, 
+	0x45, 0x5f, 0x63, 0x70, 0x70, 0x5f, 0x73, 0x74, 
+	0x79, 0x6c, 0x65, 0x5f, 0x6c, 0x69, 0x6e, 0x65, 
+	0x5f, 0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x69, 
+	0x76, 0x65, 0x00, 0x00, 0x04, 0x00, 0x08, 0x00, 
+	0x47, 0x4c, 0x5f, 0x47, 0x4f, 0x4f, 0x47, 0x4c, 
+	0x45, 0x5f, 0x69, 0x6e, 0x63, 0x6c, 0x75, 0x64, 
+	0x65, 0x5f, 0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 
+	0x69, 0x76, 0x65, 0x00, 0x05, 0x00, 0x04, 0x00, 
+	0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69, 0x6e, 
+	0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x05, 0x00, 
+	0x09, 0x00, 0x00, 0x00, 0x6f, 0x75, 0x74, 0x43, 
+	0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x00, 0x00, 0x00, 
+	0x05, 0x00, 0x05, 0x00, 0x0c, 0x00, 0x00, 0x00, 
+	0x66, 0x72, 0x61, 0x67, 0x43, 0x6f, 0x6c, 0x6f, 
+	0x72, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 
+	0x09, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 
+	0x0c, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x02, 0x00, 
+	0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x03, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 
+	0x16, 0x00, 0x03, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x20, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 
+	0x07, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x04, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04, 0x00, 
+	0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 
+	0x07, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x04, 0x00, 
+	0x08, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 
+	0x0a, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x03, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
+	0x0a, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x04, 0x00, 
+	0x0b, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 
+	0x01, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 
+	0x06, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x80, 0x3f, 0x36, 0x00, 0x05, 0x00, 
+	0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 
+	0xf8, 0x00, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 
+	0x3d, 0x00, 0x04, 0x00, 0x0a, 0x00, 0x00, 0x00, 
+	0x0d, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 
+	0x51, 0x00, 0x05, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x0f, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x51, 0x00, 0x05, 0x00, 
+	0x06, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 
+	0x0d, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
+	0x51, 0x00, 0x05, 0x00, 0x06, 0x00, 0x00, 0x00, 
+	0x11, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 
+	0x02, 0x00, 0x00, 0x00, 0x50, 0x00, 0x07, 0x00, 
+	0x07, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 
+	0x0f, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 
+	0x11, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 
+	0x3e, 0x00, 0x03, 0x00, 0x09, 0x00, 0x00, 0x00, 
+	0x12, 0x00, 0x00, 0x00, 0xfd, 0x00, 0x01, 0x00, 
+	0x38, 0x00, 0x01, 0x00, 
 };
-
-
-
-PS_INPUT vs_main(VS_INPUT input)
-{
-    PS_INPUT output;
-    output.position_screen = input.position;
-    output.position = input.position;
-    output.uv = input.uv;
-    output.color = input.color;
-    output.texture_index = input.texture_index;
-    output.type          = input.type;
-    output.sampler_index = input.sampler_index;
-    output.self_uv = input.self_uv;
-	for (int i = 0; i < $VERTEX_2D_USER_DATA_COUNT; i++) {
-    	output.userdata[i] = input.userdata[i];
-	}
-	output.scissor = input.scissor;
-	output.has_scissor = input.has_scissor;
-    return output;
-}
-
-// #Magicvalue
-Texture2D textures[32] : register(t0);
-SamplerState image_sampler_0 : register(s0);
-SamplerState image_sampler_1 : register(s1);
-SamplerState image_sampler_2 : register(s2);
-SamplerState image_sampler_3 : register(s3);
-
-float4 sample_texture(int texture_index, int sampler_index, float2 uv) {
-	// I love hlsl
-	if (sampler_index == 0) {
-		if (texture_index ==  0)       return textures[0].Sample(image_sampler_0, uv);
-		else if (texture_index ==  1)  return textures[1].Sample(image_sampler_0, uv);
-		else if (texture_index ==  2)  return textures[2].Sample(image_sampler_0, uv);
-		else if (texture_index ==  3)  return textures[3].Sample(image_sampler_0, uv);
-		else if (texture_index ==  4)  return textures[4].Sample(image_sampler_0, uv);
-		else if (texture_index ==  5)  return textures[5].Sample(image_sampler_0, uv);
-		else if (texture_index ==  6)  return textures[6].Sample(image_sampler_0, uv);
-		else if (texture_index ==  7)  return textures[7].Sample(image_sampler_0, uv);
-		else if (texture_index ==  8)  return textures[8].Sample(image_sampler_0, uv);
-		else if (texture_index ==  9)  return textures[9].Sample(image_sampler_0, uv);
-		else if (texture_index ==  10) return textures[10].Sample(image_sampler_0, uv);
-		else if (texture_index ==  11) return textures[11].Sample(image_sampler_0, uv);
-		else if (texture_index ==  12) return textures[12].Sample(image_sampler_0, uv);
-		else if (texture_index ==  13) return textures[13].Sample(image_sampler_0, uv);
-		else if (texture_index ==  14) return textures[14].Sample(image_sampler_0, uv);
-		else if (texture_index ==  15) return textures[15].Sample(image_sampler_0, uv);
-		else if (texture_index ==  16) return textures[16].Sample(image_sampler_0, uv);
-		else if (texture_index ==  17) return textures[17].Sample(image_sampler_0, uv);
-		else if (texture_index ==  18) return textures[18].Sample(image_sampler_0, uv);
-		else if (texture_index ==  19) return textures[19].Sample(image_sampler_0, uv);
-		else if (texture_index ==  20) return textures[20].Sample(image_sampler_0, uv);
-		else if (texture_index ==  21) return textures[21].Sample(image_sampler_0, uv);
-		else if (texture_index ==  22) return textures[22].Sample(image_sampler_0, uv);
-		else if (texture_index ==  23) return textures[23].Sample(image_sampler_0, uv);
-		else if (texture_index ==  24) return textures[24].Sample(image_sampler_0, uv);
-		else if (texture_index ==  25) return textures[25].Sample(image_sampler_0, uv);
-		else if (texture_index ==  26) return textures[26].Sample(image_sampler_0, uv);
-		else if (texture_index ==  27) return textures[27].Sample(image_sampler_0, uv);
-		else if (texture_index ==  28) return textures[28].Sample(image_sampler_0, uv);
-		else if (texture_index ==  29) return textures[29].Sample(image_sampler_0, uv);
-		else if (texture_index ==  30) return textures[30].Sample(image_sampler_0, uv);
-		else if (texture_index ==  31) return textures[31].Sample(image_sampler_0, uv);
-	} else if (sampler_index == 1) {
-		if (texture_index ==  0)       return textures[0].Sample(image_sampler_1, uv);
-		else if (texture_index ==  1)  return textures[1].Sample(image_sampler_1, uv);
-		else if (texture_index ==  2)  return textures[2].Sample(image_sampler_1, uv);
-		else if (texture_index ==  3)  return textures[3].Sample(image_sampler_1, uv);
-		else if (texture_index ==  4)  return textures[4].Sample(image_sampler_1, uv);
-		else if (texture_index ==  5)  return textures[5].Sample(image_sampler_1, uv);
-		else if (texture_index ==  6)  return textures[6].Sample(image_sampler_1, uv);
-		else if (texture_index ==  7)  return textures[7].Sample(image_sampler_1, uv);
-		else if (texture_index ==  8)  return textures[8].Sample(image_sampler_1, uv);
-		else if (texture_index ==  9)  return textures[9].Sample(image_sampler_1, uv);
-		else if (texture_index ==  10) return textures[10].Sample(image_sampler_1, uv);
-		else if (texture_index ==  11) return textures[11].Sample(image_sampler_1, uv);
-		else if (texture_index ==  12) return textures[12].Sample(image_sampler_1, uv);
-		else if (texture_index ==  13) return textures[13].Sample(image_sampler_1, uv);
-		else if (texture_index ==  14) return textures[14].Sample(image_sampler_1, uv);
-		else if (texture_index ==  15) return textures[15].Sample(image_sampler_1, uv);
-		else if (texture_index ==  16) return textures[16].Sample(image_sampler_1, uv);
-		else if (texture_index ==  17) return textures[17].Sample(image_sampler_1, uv);
-		else if (texture_index ==  18) return textures[18].Sample(image_sampler_1, uv);
-		else if (texture_index ==  19) return textures[19].Sample(image_sampler_1, uv);
-		else if (texture_index ==  20) return textures[20].Sample(image_sampler_1, uv);
-		else if (texture_index ==  21) return textures[21].Sample(image_sampler_1, uv);
-		else if (texture_index ==  22) return textures[22].Sample(image_sampler_1, uv);
-		else if (texture_index ==  23) return textures[23].Sample(image_sampler_1, uv);
-		else if (texture_index ==  24) return textures[24].Sample(image_sampler_1, uv);
-		else if (texture_index ==  25) return textures[25].Sample(image_sampler_1, uv);
-		else if (texture_index ==  26) return textures[26].Sample(image_sampler_1, uv);
-		else if (texture_index ==  27) return textures[27].Sample(image_sampler_1, uv);
-		else if (texture_index ==  28) return textures[28].Sample(image_sampler_1, uv);
-		else if (texture_index ==  29) return textures[29].Sample(image_sampler_1, uv);
-		else if (texture_index ==  30) return textures[30].Sample(image_sampler_1, uv);
-		else if (texture_index ==  31) return textures[31].Sample(image_sampler_1, uv);
-	} else if (sampler_index == 2) {
-		if (texture_index ==  0)       return textures[0].Sample(image_sampler_2, uv);
-		else if (texture_index ==  1)  return textures[1].Sample(image_sampler_2, uv);
-		else if (texture_index ==  2)  return textures[2].Sample(image_sampler_2, uv);
-		else if (texture_index ==  3)  return textures[3].Sample(image_sampler_2, uv);
-		else if (texture_index ==  4)  return textures[4].Sample(image_sampler_2, uv);
-		else if (texture_index ==  5)  return textures[5].Sample(image_sampler_2, uv);
-		else if (texture_index ==  6)  return textures[6].Sample(image_sampler_2, uv);
-		else if (texture_index ==  7)  return textures[7].Sample(image_sampler_2, uv);
-		else if (texture_index ==  8)  return textures[8].Sample(image_sampler_2, uv);
-		else if (texture_index ==  9)  return textures[9].Sample(image_sampler_2, uv);
-		else if (texture_index ==  10) return textures[10].Sample(image_sampler_2, uv);
-		else if (texture_index ==  11) return textures[11].Sample(image_sampler_2, uv);
-		else if (texture_index ==  12) return textures[12].Sample(image_sampler_2, uv);
-		else if (texture_index ==  13) return textures[13].Sample(image_sampler_2, uv);
-		else if (texture_index ==  14) return textures[14].Sample(image_sampler_2, uv);
-		else if (texture_index ==  15) return textures[15].Sample(image_sampler_2, uv);
-		else if (texture_index ==  16) return textures[16].Sample(image_sampler_2, uv);
-		else if (texture_index ==  17) return textures[17].Sample(image_sampler_2, uv);
-		else if (texture_index ==  18) return textures[18].Sample(image_sampler_2, uv);
-		else if (texture_index ==  19) return textures[19].Sample(image_sampler_2, uv);
-		else if (texture_index ==  20) return textures[20].Sample(image_sampler_2, uv);
-		else if (texture_index ==  21) return textures[21].Sample(image_sampler_2, uv);
-		else if (texture_index ==  22) return textures[22].Sample(image_sampler_2, uv);
-		else if (texture_index ==  23) return textures[23].Sample(image_sampler_2, uv);
-		else if (texture_index ==  24) return textures[24].Sample(image_sampler_2, uv);
-		else if (texture_index ==  25) return textures[25].Sample(image_sampler_2, uv);
-		else if (texture_index ==  26) return textures[26].Sample(image_sampler_2, uv);
-		else if (texture_index ==  27) return textures[27].Sample(image_sampler_2, uv);
-		else if (texture_index ==  28) return textures[28].Sample(image_sampler_2, uv);
-		else if (texture_index ==  29) return textures[29].Sample(image_sampler_2, uv);
-		else if (texture_index ==  30) return textures[30].Sample(image_sampler_2, uv);
-		else if (texture_index ==  31) return textures[31].Sample(image_sampler_2, uv);
-	} else if (sampler_index == 3) {
-		if (texture_index ==  0)       return textures[0].Sample(image_sampler_3, uv);
-		else if (texture_index ==  1)  return textures[1].Sample(image_sampler_3, uv);
-		else if (texture_index ==  2)  return textures[2].Sample(image_sampler_3, uv);
-		else if (texture_index ==  3)  return textures[3].Sample(image_sampler_3, uv);
-		else if (texture_index ==  4)  return textures[4].Sample(image_sampler_3, uv);
-		else if (texture_index ==  5)  return textures[5].Sample(image_sampler_3, uv);
-		else if (texture_index ==  6)  return textures[6].Sample(image_sampler_3, uv);
-		else if (texture_index ==  7)  return textures[7].Sample(image_sampler_3, uv);
-		else if (texture_index ==  8)  return textures[8].Sample(image_sampler_3, uv);
-		else if (texture_index ==  9)  return textures[9].Sample(image_sampler_3, uv);
-		else if (texture_index ==  10) return textures[10].Sample(image_sampler_3, uv);
-		else if (texture_index ==  11) return textures[11].Sample(image_sampler_3, uv);
-		else if (texture_index ==  12) return textures[12].Sample(image_sampler_3, uv);
-		else if (texture_index ==  13) return textures[13].Sample(image_sampler_3, uv);
-		else if (texture_index ==  14) return textures[14].Sample(image_sampler_3, uv);
-		else if (texture_index ==  15) return textures[15].Sample(image_sampler_3, uv);
-		else if (texture_index ==  16) return textures[16].Sample(image_sampler_3, uv);
-		else if (texture_index ==  17) return textures[17].Sample(image_sampler_3, uv);
-		else if (texture_index ==  18) return textures[18].Sample(image_sampler_3, uv);
-		else if (texture_index ==  19) return textures[19].Sample(image_sampler_3, uv);
-		else if (texture_index ==  20) return textures[20].Sample(image_sampler_3, uv);
-		else if (texture_index ==  21) return textures[21].Sample(image_sampler_3, uv);
-		else if (texture_index ==  22) return textures[22].Sample(image_sampler_3, uv);
-		else if (texture_index ==  23) return textures[23].Sample(image_sampler_3, uv);
-		else if (texture_index ==  24) return textures[24].Sample(image_sampler_3, uv);
-		else if (texture_index ==  25) return textures[25].Sample(image_sampler_3, uv);
-		else if (texture_index ==  26) return textures[26].Sample(image_sampler_3, uv);
-		else if (texture_index ==  27) return textures[27].Sample(image_sampler_3, uv);
-		else if (texture_index ==  28) return textures[28].Sample(image_sampler_3, uv);
-		else if (texture_index ==  29) return textures[29].Sample(image_sampler_3, uv);
-		else if (texture_index ==  30) return textures[30].Sample(image_sampler_3, uv);
-		else if (texture_index ==  31) return textures[31].Sample(image_sampler_3, uv);
-	}
-	
-	return float4(1.0, 0.0, 0.0, 1.0);
-}
-
-
-\n
-
-$INJECT_PIXEL_POST_PROCESS
-
-\n
-\043define QUAD_TYPE_REGULAR 0\n
-\043define QUAD_TYPE_TEXT 1\n
-\043define QUAD_TYPE_CIRCLE 2\n
-float4 ps_main(PS_INPUT input) : SV_TARGET
-{
-
-	if (input.has_scissor) {
-		float2 screen_pos = input.position_screen.xy;
-		if (screen_pos.x < input.scissor.x || screen_pos.x >= input.scissor.z ||
-			screen_pos.y < input.scissor.y || screen_pos.y >= input.scissor.w)
-				discard;
-	}
-
-	if (input.type == QUAD_TYPE_REGULAR) {
-		if (input.texture_index >= 0 && input.texture_index < 32 && input.sampler_index >= 0  && input.sampler_index <= 3) {
-			return pixel_shader_extension(input, sample_texture(input.texture_index, input.sampler_index, input.uv)*input.color);
-		} else {
-			return pixel_shader_extension(input, input.color);
-		}
-	} else if (input.type == QUAD_TYPE_TEXT) {
-		if (input.texture_index >= 0 && input.texture_index < 32 && input.sampler_index >= 0  && input.sampler_index <= 3) {
-			float alpha = sample_texture(input.texture_index, input.sampler_index, input.uv).x;
-			return pixel_shader_extension(input, float4(1.0, 1.0, 1.0, alpha)*input.color);
-		} else {
-			return pixel_shader_extension(input, input.color);
-		}
-	} else if (input.type == QUAD_TYPE_CIRCLE) {
-	
-		float dist = length(input.self_uv-float2(0.5, 0.5));
-	
-		if (dist > 0.5) return float4(0.0, 0.0, 0.0, 0.0);
-	
-		if (input.texture_index >= 0 && input.texture_index < 32 && input.sampler_index >= 0  && input.sampler_index <= 3) {
-			return pixel_shader_extension(input, sample_texture(input.texture_index, input.sampler_index, input.uv)*input.color);
-		} else {
-			return pixel_shader_extension(input, input.color);
-		}
-	} 
-	
-	return float4(1.0, 1.0, 0.0, 1.0);
-}
-);
