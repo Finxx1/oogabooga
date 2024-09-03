@@ -161,6 +161,8 @@ size_t stbtt_strlen(const char* str) {
 #undef L
 
 #if GFX_RENDERER == GFX_RENDERER_VULKAN
-#include "third_party/vulkan/vulkan.h"
+#define VOLK_IMPLEMENTATION
+#define VK_USE_PLATFORM_WIN32_KHR
+#include "third_party/volk.h"
 #endif
 
