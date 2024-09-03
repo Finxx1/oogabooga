@@ -831,7 +831,6 @@ void d3d11_process_draw_frame() {
 				ID3D11DeviceContext_Unmap(d3d11_context, (ID3D11Resource*)d3d11_quad_vbo, 0);
 			}
 		}
-		
 		///
 		// Draw call
 		tm_scope("Draw call") d3d11_draw_call(number_of_rendered_quads, textures, num_textures);

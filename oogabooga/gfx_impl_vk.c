@@ -1,6 +1,3 @@
-
-
-
 const Gfx_Handle GFX_INVALID_HANDLE = 0;
 
 // We wanna pack this at some point
@@ -67,14 +64,14 @@ typedef struct Vk_Data {
 	VkQueue present_queue;
 	VkSurfaceKHR surface;
 	Vk_QueueFamilyIndices family_indices;
-	Vk_Swapchan swapchain;
+	Vk_Swapchain swapchain;
 	Vk_ImageViews image_views;
 	VkShaderModule vert_shader;
 	VkShaderModule frag_shader;
 	VkRenderPass render_pass;
 	VkPipelineLayout pipeline_layout;
 	VkPipeline pipeline;
-	vk_framebuffers_t framebuffers;
+	Vk_Framebuffers framebuffers;
 	VkCommandPool command_pool;
 	VkBuffer vertex_buffer;
 	VkDeviceMemory vertex_buffer_mem;
@@ -85,11 +82,98 @@ typedef struct Vk_Data {
 	uint32_t frame;
 } Vk_Data;
 
+// Commented out values trigger windows defender for some reason
+const char* vk_result_table(VkResult r) {
+	switch (r) {
+	case VK_SUCCESS: return "VK_SUCCESS";
+	case VK_NOT_READY: return "VK_NOT_READY";
+	case VK_TIMEOUT: return "VK_TIMEOUT";
+	case VK_EVENT_SET: return "VK_EVENT_SET";
+	case VK_EVENT_RESET: return "VK_EVENT_RESET";
+	case VK_INCOMPLETE: return "VK_INCOMPLETE";
+	case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+	case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+	case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+	case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+	case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
+	case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
+	case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+	case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+	case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+	case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+	case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+	case VK_ERROR_FRAGMENTED_POOL: return "VK_ERROR_FRAGMENTED_POOL";
+	case VK_ERROR_UNKNOWN: return "VK_ERROR_UNKNOWN";
+	case VK_ERROR_OUT_OF_POOL_MEMORY: return "VK_ERROR_OUT_OF_POOL_MEMORY";
+	case VK_ERROR_INVALID_EXTERNAL_HANDLE: return "VK_ERROR_INVALID_EXTERNAL_HANDLE";
+	case VK_ERROR_FRAGMENTATION: return "VK_ERROR_FRAGMENTATION";
+	case VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS: return "VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS";
+	case VK_PIPELINE_COMPILE_REQUIRED: return "VK_PIPELINE_COMPILE_REQUIRED";
+	case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
+//	case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR: return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
+	case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
+//	case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
+//	case VK_ERROR_INCOMPATIBLE_DISPLAY_KHR: return "VK_ERROR_INCOMPATIBLE_DISPLAY_KHR";
+//	case VK_ERROR_VALIDATION_FAILED_EXT: return "VK_ERROR_VALIDATION_FAILED_EXT";
+//	case VK_ERROR_INVALID_SHADER_NV: return "VK_ERROR_INVALID_SHADER_NV";
+//	case VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR: return "VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR";
+//	case VK_ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR: return "VK_ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR";
+//	case VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR: return "VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR";
+//	case VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR: return "VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR";
+//	case VK_ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR: return "VK_ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR";
+//	case VK_ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR: return "VK_ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR";
+//	case VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT: return "VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT";
+//	case VK_ERROR_NOT_PERMITTED_KHR: return "VK_ERROR_NOT_PERMITTED_KHR";
+	case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT: return "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT";
+	case VK_THREAD_IDLE_KHR: return "VK_THREAD_IDLE_KHR";
+	case VK_THREAD_DONE_KHR: return "VK_THREAD_DONE_KHR";
+	case VK_OPERATION_DEFERRED_KHR: return "VK_OPERATION_DEFERRED_KHR";
+	case VK_OPERATION_NOT_DEFERRED_KHR: return "VK_OPERATION_NOT_DEFERRED_KHR";
+	case VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR: return "VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR";
+	case VK_ERROR_COMPRESSION_EXHAUSTED_EXT: return "VK_ERROR_COMPRESSION_EXHAUSTED_EXT";
+	case VK_INCOMPATIBLE_SHADER_BINARY_EXT: return "VK_INCOMPATIBLE_SHADER_BINARY_EXT";
+	default: return "Unknown";
+	}
+}
+
+// #Macros
+#define vk_generic_enum(func, first, type, name)\
+uint32_t name ## _count = 0;\
+func ( first , & name ## _count, NULL);\
+type * name ## s = malloc(sizeof(type) * name ## _count);\
+func ( first , & name ## _count, name ## s)
+
+#define vk_zero_check_enum(func, first, type, name)\
+uint32_t name ## _count = 0;\
+func ( first , & name ## _count, NULL);\
+if ( name ## _count == 0) vk(VK_ERROR_UNKNOWN);\
+type * name ## s = malloc(sizeof(type) * name ## _count);\
+func ( first , & name ## _count, name ## s)
+
+#define vk_zero_check_enum_2(func, first, second, type, name)\
+uint32_t name ## _count = 0;\
+func ( first , second , & name ## _count, NULL);\
+if ( name ## _count == 0) vk(VK_ERROR_UNKNOWN);\
+type * name ## s = malloc(sizeof(type) * name ## _count);\
+func ( first , second , & name ## _count, name ## s)
+
+#define vk(r) vk_impl(r, __FILE__, __LINE__)
+void vk_impl(VkResult r, const char* file, int line) {
+	if (r != VK_SUCCESS) {
+		const char* errstr = vk_result_table(r);
+		tprint("Vulkan Error %s at %s:%d", errstr, file, line);
+		volatile char* lol = NULL;
+		lol[0] = 0; // CRASH
+	}
+}
+
 // #Global
 Vk_Data vk_data;
 u32 vk_swap_chain_width = 0;
 u32 vk_swap_chain_height = 0;
 
+// TODO: Fix this when I figure out validation layers!
+/*
 const char* vk_stringify_severity(VkDebugUtilsMessageSeverityFlagBitsEXT severity) {
     switch (severity) {
     case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT: return "Error";
@@ -110,7 +194,7 @@ const char* vk_stringify_category(VkDebugUtilsMessageTypeFlagsEXT category) {
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT category, const VkDebugUtilsMessengerCallbackDataEXT* data, void* userdata) {
-	string msg = tprint("VULKAN MESSAGE [Category: %cs, Severity: %cs, id: %d]: %cs", vk_stringify_category(category), vk_stringify_severity(severity), id, description);
+	string msg = tprint("VULKAN MESSAGE [Category: %cs, Severity: %cs]: %cs", vk_stringify_category(category), vk_stringify_severity(severity), description);
 	
 	switch (severity) {
 		case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
@@ -130,6 +214,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_callback(VkDebugUtilsMessageSeverityFlag
 			break;
 	}
 }
+*/
 
 Vk_QueueFamilyIndices vk_find_queue_family(VkPhysicalDevice device) {
 		Vk_QueueFamilyIndices indices = {0};
@@ -314,7 +399,7 @@ VkSurfaceKHR vk_create_surface(void* hWnd, void* hInstance) {
 	return r;
 }
 
-Vk_Swapchan vk_create_swapchain(uint32_t w, uint32_t h, Vk_QueueFamilyIndices indices) {
+Vk_Swapchain vk_create_swapchain(uint32_t w, uint32_t h, Vk_QueueFamilyIndices indices) {
 	Vk_Swapchain_Details details = vk_query_swapchain_details(vk_data.physical_device);
 	
 	VkSurfaceFormatKHR format = vk_get_surface_format(details);
@@ -351,7 +436,7 @@ Vk_Swapchan vk_create_swapchain(uint32_t w, uint32_t h, Vk_QueueFamilyIndices in
 		createinfo.pQueueFamilyIndices = family_indices;
 	}
 	
-	Vk_Swapchan r;
+	Vk_Swapchain r;
 	vk(vkCreateSwapchainKHR(vk_data.device, &createinfo, NULL, &r.swapchain));
 	
 	free(details.formats);
@@ -378,7 +463,12 @@ Vk_ImageViews vk_create_image_views(void) {
 			.image = vk_data.swapchain.swapchain_images[i],
 			.viewType = VK_IMAGE_VIEW_TYPE_2D,
 			.format = vk_data.swapchain.format,
-			.components = { VK_COMPONENT_SWIZZLE_IDENTITY },
+			.components = {
+				VK_COMPONENT_SWIZZLE_IDENTITY,
+				VK_COMPONENT_SWIZZLE_IDENTITY,
+				VK_COMPONENT_SWIZZLE_IDENTITY,
+				VK_COMPONENT_SWIZZLE_IDENTITY,
+			},
 			.subresourceRange = {
 				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 				.baseMipLevel = 0,
@@ -437,7 +527,7 @@ VkPipeline vk_create_graphics_pipeline(void) {
 	
 	VkVertexInputBindingDescription vertex_input_binding_desc = {
 		.binding = 0,
-		.stride = sizeof(vk_vertex),
+		.stride = sizeof(Vk_Vertex),
 		.inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
 	};
 	
@@ -446,13 +536,13 @@ VkPipeline vk_create_graphics_pipeline(void) {
 			.binding = 0,
 			.location = 0,
 			.format = VK_FORMAT_R32G32_SFLOAT,
-			.offset = offsetof(vk_vertex, pos),
+			.offset = offsetof(Vk_Vertex, pos),
 		},
 		{
 			.binding = 0,
 			.location = 1,
 			.format = VK_FORMAT_R32G32B32_SFLOAT,
-			.offset = offsetof(vk_vertex, color),
+			.offset = offsetof(Vk_Vertex, color),
 		},
 	};
 	
@@ -822,64 +912,13 @@ void gfx_init() {
 
 	window.enable_vsync = false;
 
-	log_verbose("d3d11 gfx_init");
+	log_verbose("vulkan gfx_init");
 
     HWND hwnd = window._os_handle;
-	HRESULT hr = S_OK;
 
-	D3D11_CREATE_DEVICE_FLAG flags = 0; 
-#if CONFIGURATION == DEBUG 
-	flags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
-
-	D3D_DRIVER_TYPE driver_types[] = {
-		D3D_DRIVER_TYPE_HARDWARE, 
-		D3D_DRIVER_TYPE_WARP, 
-		D3D_DRIVER_TYPE_REFERENCE
-	};
-	s64 num_drivers = sizeof(driver_types)/sizeof(D3D_DRIVER_TYPE);
-	
-	D3D_FEATURE_LEVEL feature_levels[] = {
-		D3D_FEATURE_LEVEL_11_1, 
-		D3D_FEATURE_LEVEL_11_0, 
-		D3D_FEATURE_LEVEL_10_1, 
-		D3D_FEATURE_LEVEL_10_0
-	};
-	s64 num_feature_levels = sizeof(feature_levels)/sizeof(D3D_FEATURE_LEVEL);
-	
-	bool debug_failed = false;
-	
-	for (s64 i = 0; i < 2; i++) {
-		for (s64 i = 0; i < num_drivers; i++) {
-			d3d11_driver_type = driver_types[i]; 
-			
-			hr = D3D11CreateDevice(0, d3d11_driver_type, 0, flags, feature_levels, num_feature_levels, D3D11_SDK_VERSION, &d3d11_device, &d3d11_feature_level, &d3d11_context);
-			
-			if (hr == E_INVALIDARG) {
-				// 11_1 not recognized in 11.0
-				hr = D3D11CreateDevice(0, d3d11_driver_type, 0, flags, feature_levels+1, num_feature_levels-1, D3D11_SDK_VERSION, &d3d11_device, &d3d11_feature_level, &d3d11_context);
-			}
-			
-			if (SUCCEEDED(hr)) break;
-			
-			log_verbose("Failed driver type number %d (%d)", i, driver_types[i]);
-		}
-		if (SUCCEEDED(hr)) {
-			break;
-		} else {
-			debug_failed = true;
-			flags &= ~(D3D11_CREATE_DEVICE_DEBUG);
-			
-		}
-	}
-	
-	d3d11_check_hr(hr);
-	
-	if (debug_failed) {
-		log_error("We could not init D3D11 with DEBUG flag. To fix this, you can try:\n1. Go to windows settings\n2. Go to System -> Optional features\n3. Add the feature called \"Graphics Tools\"\n4. Restart your computer\n5. Be frustrated that windows is like this.\nhttps://devblogs.microsoft.com/cppblog/visual-studio-2015-and-graphics-tools-for-windows-10/");
-	}
-	
-	assert(d3d11_device != 0, "D3D11CreateDevice failed");
+	vk(volkInitialize());
+	vk_data.instance = vk_create_instance();
+	volkLoadInstance(vk_data.instance);
 
 #if CONFIGURATION == DEBUG
 	hr = ID3D11Device_QueryInterface(d3d11_device, &IID_ID3D11Debug, (void**)&d3d11_debug);
