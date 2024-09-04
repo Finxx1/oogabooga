@@ -2,21 +2,9 @@ const Gfx_Handle GFX_INVALID_HANDLE = 0;
 
 // We wanna pack this at some point
 // #Cleanup #Memory why am I doing alignat(16)?
-typedef struct alignat(16) D3D11_Vertex {
-	
-	Vector4 color;
-	Vector4 position;
-	Vector2 uv;
-	Vector2 self_uv;
-	s8 texture_index;
-	u8 type;
-	u8 sampler;
-	u8 has_scissor;
-	
-	Vector4 userdata[VERTEX_2D_USER_DATA_COUNT];
-	
-	Vector4 scissor;
-	
+typedef struct alignat(16) Vk_Vertex {
+	Vector2 pos;
+	Vector3 color;
 } Vk_Vertex;
 
 // #Types
@@ -73,6 +61,7 @@ typedef struct Vk_Data {
 	VkPipeline pipeline;
 	Vk_Framebuffers framebuffers;
 	VkCommandPool command_pool;
+	u64 vertex_buffer_size;
 	VkBuffer vertex_buffer;
 	VkDeviceMemory vertex_buffer_mem;
 	VkCommandBuffer command_buffers[2];
@@ -140,30 +129,28 @@ const char* vk_result_table(VkResult r) {
 #define vk_generic_enum(func, first, type, name)\
 uint32_t name ## _count = 0;\
 func ( first , & name ## _count, NULL);\
-type * name ## s = malloc(sizeof(type) * name ## _count);\
+type * name ## s = alloc(get_heap_allocator(), sizeof(type) * name ## _count);\
 func ( first , & name ## _count, name ## s)
 
 #define vk_zero_check_enum(func, first, type, name)\
 uint32_t name ## _count = 0;\
 func ( first , & name ## _count, NULL);\
 if ( name ## _count == 0) vk(VK_ERROR_UNKNOWN);\
-type * name ## s = malloc(sizeof(type) * name ## _count);\
+type * name ## s = alloc(get_heap_allocator(), sizeof(type) * name ## _count);\
 func ( first , & name ## _count, name ## s)
 
 #define vk_zero_check_enum_2(func, first, second, type, name)\
 uint32_t name ## _count = 0;\
 func ( first , second , & name ## _count, NULL);\
 if ( name ## _count == 0) vk(VK_ERROR_UNKNOWN);\
-type * name ## s = malloc(sizeof(type) * name ## _count);\
+type * name ## s = alloc(get_heap_allocator(), sizeof(type) * name ## _count);\
 func ( first , second , & name ## _count, name ## s)
 
 #define vk(r) vk_impl(r, __FILE__, __LINE__)
 void vk_impl(VkResult r, const char* file, int line) {
 	if (r != VK_SUCCESS) {
 		const char* errstr = vk_result_table(r);
-		tprint("Vulkan Error %s at %s:%d", errstr, file, line);
-		volatile char* lol = NULL;
-		lol[0] = 0; // CRASH
+		log_error("Vulkan Error %s at %s:%d", errstr, file, line);
 	}
 }
 
@@ -171,6 +158,12 @@ void vk_impl(VkResult r, const char* file, int line) {
 Vk_Data vk_data;
 u32 vk_swap_chain_width = 0;
 u32 vk_swap_chain_height = 0;
+const u64 vk_image_shader_vert_size;
+const u8 vk_image_shader_vert[];
+const u64 vk_image_shader_frag_size;
+const u8 vk_image_shader_frag[];
+Vk_Vertex* vk_staging_quad_buffer = NULL;
+u64 vk_staging_quad_buffer_size = 0;
 
 // TODO: Fix this when I figure out validation layers!
 /*
@@ -233,8 +226,7 @@ Vk_QueueFamilyIndices vk_find_queue_family(VkPhysicalDevice device) {
 				indices.has_graphics = true;
 			}
 		}
-		
-		free(queue_familys);
+		dealloc(get_heap_allocator(), queue_familys);
 		
 		return indices;
 }
@@ -329,7 +321,7 @@ VkPhysicalDevice vk_create_physical_device(void) {
 	
 	VkPhysicalDevice r = devices[chosen_device];
 	
-	free(devices);
+	dealloc(get_heap_allocator(), devices);
 	
 	return r;
 }
@@ -439,14 +431,14 @@ Vk_Swapchain vk_create_swapchain(uint32_t w, uint32_t h, Vk_QueueFamilyIndices i
 	Vk_Swapchain r;
 	vk(vkCreateSwapchainKHR(vk_data.device, &createinfo, NULL, &r.swapchain));
 	
-	free(details.formats);
-	free(details.present_modes);
+	dealloc(get_heap_allocator(), details.formats);
+	dealloc(get_heap_allocator(), details.present_modes);
 	
 	r.format = format.format;
 	r.extent = extent;
 	
 	vkGetSwapchainImagesKHR(vk_data.device, r.swapchain, &r.swapchain_image_count, NULL);
-	r.swapchain_images = malloc(r.swapchain_image_count * sizeof(VkImage));
+	r.swapchain_images = alloc(get_heap_allocator(), r.swapchain_image_count * sizeof(VkImage));
 	vkGetSwapchainImagesKHR(vk_data.device, r.swapchain, &r.swapchain_image_count, r.swapchain_images);
 	
 	return r;
@@ -455,7 +447,7 @@ Vk_Swapchain vk_create_swapchain(uint32_t w, uint32_t h, Vk_QueueFamilyIndices i
 Vk_ImageViews vk_create_image_views(void) {
 	Vk_ImageViews r;
 	r.view_count = vk_data.swapchain.swapchain_image_count;
-	r.views = malloc(r.view_count * sizeof(VkImageView));
+	r.views = alloc(get_heap_allocator(), r.view_count * sizeof(VkImageView));
 	
 	for (uint32_t i = 0; i < r.view_count; i++) {
 		VkImageViewCreateInfo createinfo = {
@@ -484,7 +476,7 @@ Vk_ImageViews vk_create_image_views(void) {
 	return r;
 }
 
-VkShaderModule vk_create_shader(void* data, u32 length) {
+VkShaderModule vk_create_shader(const u8* data, u32 length) {
 	VkShaderModuleCreateInfo createinfo = {
 		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
 		.codeSize = length,
@@ -694,10 +686,10 @@ VkRenderPass vk_create_render_pass(void) {
 	return r;
 }
 
-vk_framebuffers_t vk_create_framebuffers(void) {
-	vk_framebuffers_t r;
+Vk_Framebuffers vk_create_framebuffers(void) {
+	Vk_Framebuffers r;
 	r.count = vk_data.image_views.view_count;
-	r.data = malloc(sizeof(VkFramebuffer) * r.count);
+	r.data = alloc(get_heap_allocator(), sizeof(VkFramebuffer) * r.count);
 	
 	for (uint32_t i = 0; i < r.count; i++) {
 		VkImageView attachments[] = {
@@ -746,10 +738,10 @@ uint32_t vk_find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags props) 
 	return 0;
 }
 
-VkBuffer vk_create_vertex_buffer(void) {
+VkBuffer vk_create_vertex_buffer(u64 number_of_bytes) {
 	VkBufferCreateInfo buffer_createinfo = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size = sizeof(verts[0]) * vert_count,
+		.size = number_of_bytes,
 		.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 	};
@@ -795,6 +787,10 @@ VkCommandBuffer vk_create_command_buffer(void) {
 	VkCommandBuffer r;
 	vk(vkAllocateCommandBuffers(vk_data.device, &allocinfo, &r));
 	return r;
+}
+
+void gfx_clear_render_target(Gfx_Image* images, Vector4 color) {
+	return; // TODO: Offscreen drawing!
 }
 
 void vk_record(VkCommandBuffer command_buffer, uint32_t index) {
@@ -900,13 +896,20 @@ void vk_update_swapchain() {
 }
 
 bool
-vk_compile_shader(string file) {
+vk_compile_shader(void) {
 	
-	vk_data.vert_shader = vk_create_shader("monke.vert.spv");
-	vk_data.frag_shader = vk_create_shader("monke.frag.spv");
+	vk_data.vert_shader = vk_create_shader(vk_image_shader_vert, vk_image_shader_vert_size);
+	vk_data.frag_shader = vk_create_shader(vk_image_shader_frag, vk_image_shader_frag_size);
 
 	return true;
 }
+
+float verts[] = {
+	 0.0f, -0.5f, 1.0f, 0.0f, 0.0f,
+	 0.5f,  0.5f, 0.0f, 1.0f, 0.0f,
+	-0.5f,  0.5f, 0.0f, 0.0f, 1.0f,
+};
+uint32_t vert_count = 3;
 
 void gfx_init() {
 
@@ -915,183 +918,144 @@ void gfx_init() {
 	log_verbose("vulkan gfx_init");
 
     HWND hwnd = window._os_handle;
+	HINSTANCE hinstance = GetModuleHandle(NULL);
 
 	vk(volkInitialize());
 	vk_data.instance = vk_create_instance();
 	volkLoadInstance(vk_data.instance);
 
+// TODO: fix validation layers!
+/*
 #if CONFIGURATION == DEBUG
 	hr = ID3D11Device_QueryInterface(d3d11_device, &IID_ID3D11Debug, (void**)&d3d11_debug);
 	if (SUCCEEDED(hr)) {
 		log_verbose("D3D11 debug is active");
 	}
-#endif
+#endif*/
 	
-	log_verbose("Created D3D11 device");
+	log_verbose("Created Vulkan instance");
 	
-	IDXGIDevice *dxgi_device = 0;
-	IDXGIAdapter *target_adapter = 0;
-	hr = ID3D11Device_QueryInterface(d3d11_device, &IID_IDXGIDevice, (void **)&dxgi_device);
+	vk_data.surface = vk_create_surface(hwnd, hinstance);
+	vk_data.physical_device = vk_create_physical_device();
+	VkPhysicalDeviceProperties props;
+	vkGetPhysicalDeviceProperties(vk_data.physical_device, &props);
+	log("Vulkan device is: %s", props.deviceName);
 	
+	vk_data.device = vk_create_logical_device();
+	vk_data.family_indices = vk_find_queue_family(vk_data.physical_device);
 	
-	hr = IDXGIDevice_GetAdapter(dxgi_device, &target_adapter);
-    if (SUCCEEDED(hr)) {
-        DXGI_ADAPTER_DESC adapter_desc = ZERO(DXGI_ADAPTER_DESC);
-        hr = IDXGIAdapter_GetDesc(target_adapter, &adapter_desc);
-        if (SUCCEEDED(hr)) {
-            string desc = temp_win32_null_terminated_wide_to_fixed_utf8(adapter_desc.Description);
-            log("D3D11 adapter is: %s", desc);
-        } else {
-            log_error("Failed to get adapter description");
-        }
-    } else {
-        log_error("Failed querying targeted d3d11_ adapter");
-    }
-    
-    d3d11_update_swapchain();
-    
-    {
-	    D3D11_BLEND_DESC bd = ZERO(D3D11_BLEND_DESC);
-	    bd.RenderTarget[0].BlendEnable = TRUE;
-	    bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
-	    bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-	    bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-	    bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-	    bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-	    bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-	    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-	    hr = ID3D11Device_CreateBlendState(d3d11_device, &bd, &d3d11_blend_state);
-	    d3d11_check_hr(hr);
-	    ID3D11DeviceContext_OMSetBlendState(d3d11_context, d3d11_blend_state, NULL, 0xffffffff);
-	}
+	vk_data.graphics_queue = vk_create_queue(vk_data.family_indices.graphics);
+	vk_data.present_queue = vk_create_queue(vk_data.family_indices.present);
 	
-	{
-	    D3D11_RASTERIZER_DESC desc = ZERO(D3D11_RASTERIZER_DESC);
-	    desc.FillMode = D3D11_FILL_SOLID;
-	    //desc.CullMode = D3D11_CULL_BACK;
-	    desc.FrontCounterClockwise = FALSE;
-	    desc.DepthClipEnable = FALSE;
-	    desc.CullMode = D3D11_CULL_NONE;
-	    hr = ID3D11Device_CreateRasterizerState(d3d11_device, &desc, &d3d11_rasterizer);
-	    d3d11_check_hr(hr);
-	    ID3D11DeviceContext_RSSetState(d3d11_context, d3d11_rasterizer);
-	}
+	u32 window_width  = window.pixel_width;
+	u32 window_height = window.pixel_height;
 	
-	{
-	    D3D11_SAMPLER_DESC sd = ZERO(D3D11_SAMPLER_DESC);
-	    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-	    sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-	    sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-	    sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-	    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
-	    
-	    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-	    hr = ID3D11Device_CreateSamplerState(d3d11_device, &sd, &d3d11_image_sampler_np_fp);
-	    d3d11_check_hr(hr);
-	    
-	    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-	    hr =ID3D11Device_CreateSamplerState(d3d11_device, &sd, &d3d11_image_sampler_nl_fl);
-	    d3d11_check_hr(hr);
-	    
-	    sd.Filter = D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT;
-	    hr = ID3D11Device_CreateSamplerState(d3d11_device, &sd, &d3d11_image_sampler_np_fl);
-	    d3d11_check_hr(hr);
-	    
-	    sd.Filter = D3D11_FILTER_MIN_POINT_MAG_MIP_LINEAR;
-	    hr = ID3D11Device_CreateSamplerState(d3d11_device, &sd, &d3d11_image_sampler_nl_fp);
-	    d3d11_check_hr(hr);
-	}
+    vk_data.swapchain = vk_create_swapchain(window_width, window_height, vk_data.family_indices);
+	vk_data.image_views = vk_create_image_views();
 	
-	string source = STR(d3d11_image_shader_source);
-	
-	bool ok = d3d11_compile_shader(source);
-	
+	bool ok = vk_compile_shader();
 	assert(ok, "Failed compiling default shader");
+	
+	vk_data.render_pass = vk_create_render_pass();
+	vk_data.pipeline_layout = vk_create_pipeline_layout();
+	vk_data.pipeline = vk_create_graphics_pipeline();
+	vk_data.framebuffers = vk_create_framebuffers();
+	vk_data.command_pool = vk_create_command_pool(vk_data.family_indices);
+	
+	vk_data.vertex_buffer = vk_create_vertex_buffer(sizeof(verts[0]) * vert_count);
+	vk_data.vertex_buffer_mem = vk_alloc_buffer_mem(vk_data.vertex_buffer);
+	vk_buffer_set_data(vk_data.vertex_buffer_mem, verts, sizeof(verts[0]) * vert_count);
+	
+	vk_data.command_buffers[0] = vk_create_command_buffer();
+	vk_data.image_available[0] = vk_create_semaphore();
+	vk_data.render_finished[0] = vk_create_semaphore();
+	vk_data.in_flight[0] = vk_create_fence(true);
+	
+	vk_data.command_buffers[1] = vk_create_command_buffer();
+	vk_data.image_available[1] = vk_create_semaphore();
+	vk_data.render_finished[1] = vk_create_semaphore();
+	vk_data.in_flight[1] = vk_create_fence(true);
 
-	log_info("D3D11 init done");
+	log_info("Vulkan init done");
 	
 }
 
-void d3d11_draw_call(int number_of_rendered_quads, ID3D11ShaderResourceView **textures, u64 num_textures) {
-	ID3D11DeviceContext_OMSetBlendState(d3d11_context, d3d11_blend_state, 0, 0xffffffff);
-	ID3D11DeviceContext_OMSetRenderTargets(d3d11_context, 1, &d3d11_window_render_target_view, 0); 
-	ID3D11DeviceContext_RSSetState(d3d11_context, d3d11_rasterizer);
-	D3D11_VIEWPORT viewport = ZERO(D3D11_VIEWPORT);
-	viewport.Width = d3d11_swap_chain_width;
-	viewport.Height = d3d11_swap_chain_height;
-	viewport.MaxDepth = 1.0;
-	ID3D11DeviceContext_RSSetViewports(d3d11_context, 1, &viewport);
+void vk_draw_call(int number_of_rendered_quads, VkImage *textures, u64 num_textures) {
+	vkWaitForFences(vk_data.device, 1, &vk_data.in_flight[vk_data.frame], VK_TRUE, UINT64_MAX);
+	vkResetFences(vk_data.device, 1, &vk_data.in_flight[vk_data.frame]);
 	
-    UINT stride = sizeof(D3D11_Vertex);
-    UINT offset = 0;
+	uint32_t image_index;
+	vkAcquireNextImageKHR(vk_data.device, vk_data.swapchain.swapchain, UINT64_MAX, vk_data.image_available[vk_data.frame], VK_NULL_HANDLE, &image_index);
 	
-	ID3D11DeviceContext_IASetInputLayout(d3d11_context, d3d11_image_vertex_layout);
-    ID3D11DeviceContext_IASetVertexBuffers(d3d11_context, 0, 1, &d3d11_quad_vbo, &stride, &offset);
-    ID3D11DeviceContext_IASetPrimitiveTopology(d3d11_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    ID3D11DeviceContext_VSSetShader(d3d11_context, d3d11_vertex_shader_for_2d, NULL, 0);
-    ID3D11DeviceContext_PSSetShader(d3d11_context, d3d11_fragment_shader_for_2d, NULL, 0);
-    
-	if (draw_frame.cbuffer && d3d11_cbuffer && d3d11_cbuffer_size) {
-		D3D11_MAPPED_SUBRESOURCE cbuffer_mapping;
-		ID3D11DeviceContext_Map(
-			d3d11_context, 
-			(ID3D11Resource*)d3d11_cbuffer, 
-			0, 
-			D3D11_MAP_WRITE_DISCARD, 
-			0, 
-			&cbuffer_mapping
-		);
-		memcpy(cbuffer_mapping.pData, draw_frame.cbuffer, d3d11_cbuffer_size);
-		ID3D11DeviceContext_Unmap(d3d11_context, (ID3D11Resource*)d3d11_cbuffer, 0);
-		
-		ID3D11DeviceContext_PSSetConstantBuffers(d3d11_context, 0, 1, &d3d11_cbuffer);
-	}
-    
-    ID3D11DeviceContext_PSSetSamplers(d3d11_context, 0, 1, &d3d11_image_sampler_np_fp);
-    ID3D11DeviceContext_PSSetSamplers(d3d11_context, 1, 1, &d3d11_image_sampler_nl_fl);
-    ID3D11DeviceContext_PSSetSamplers(d3d11_context, 2, 1, &d3d11_image_sampler_np_fl);
-    ID3D11DeviceContext_PSSetSamplers(d3d11_context, 3, 1, &d3d11_image_sampler_nl_fp);
-    ID3D11DeviceContext_PSSetShaderResources(d3d11_context, 0, num_textures, textures);
-
-    ID3D11DeviceContext_Draw(d3d11_context, number_of_rendered_quads * 6, 0);
+	vkResetCommandBuffer(vk_data.command_buffers[vk_data.frame], 0);
+	vk_record(vk_data.command_buffers[vk_data.frame], image_index);
+	
+	VkSemaphore wait_semaphores[] = { vk_data.image_available[vk_data.frame] };
+	VkPipelineStageFlags wait_stages = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+	
+	VkSemaphore signals[] = { vk_data.render_finished[vk_data.frame] };
+	
+	VkSubmitInfo submit_info = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		.waitSemaphoreCount = 1,
+		.pWaitSemaphores = wait_semaphores,
+		.pWaitDstStageMask = &wait_stages,
+		.commandBufferCount = 1,
+		.pCommandBuffers = &vk_data.command_buffers[vk_data.frame],
+		.signalSemaphoreCount = 1,
+		.pSignalSemaphores = signals,
+	};
+	
+	vk(vkQueueSubmit(vk_data.graphics_queue, 1, &submit_info, vk_data.in_flight[vk_data.frame]));
+	
+	VkPresentInfoKHR present_info = {
+		.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+		.waitSemaphoreCount = 1,
+		.pWaitSemaphores = signals,
+		.swapchainCount = 1,
+		.pSwapchains = &vk_data.swapchain.swapchain,
+		.pImageIndices = &image_index,
+		.pResults = NULL,
+	};
+	
+	vkQueuePresentKHR(vk_data.present_queue, &present_info);
+	
+	vk_data.frame = (vk_data.frame + 1) % 2;
 }
 
-void d3d11_process_draw_frame() {
-
-	HRESULT hr;
-	
-	ID3D11DeviceContext_ClearRenderTargetView(d3d11_context, d3d11_window_render_target_view, (float*)&window.clear_color);
+void gfx_render_draw_frame(Draw_Frame *frame, Gfx_Image *render_target) {
 	
 	///
 	// Maybe grow quad vbo
-	u32 required_size = sizeof(D3D11_Vertex) * allocated_quads*6;
+	
+	if (!frame->quad_buffer) return;
 
-	if (required_size > d3d11_quad_vbo_size) {
-		if (d3d11_quad_vbo) {
-			D3D11Release(d3d11_quad_vbo);
-			dealloc(get_heap_allocator(), d3d11_staging_quad_buffer);
+	u64 number_of_quads = growing_array_get_valid_count(frame->quad_buffer);
+	
+	u32 required_size = sizeof(Vk_Vertex) * number_of_quads*6;
+
+	if (required_size > vk_data.vertex_buffer_size) {
+		if (vk_data.vertex_buffer) {
+			vkDestroyBuffer(vk_data.device, vk_data.vertex_buffer, NULL);
+			vkFreeMemory(vk_data.device, vk_data.vertex_buffer_mem, NULL);
+			dealloc(get_heap_allocator(), vk_staging_quad_buffer);
 		}
-		D3D11_BUFFER_DESC desc = ZERO(D3D11_BUFFER_DESC);
-		desc.Usage = D3D11_USAGE_DYNAMIC; 
-		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-		desc.ByteWidth = required_size;
-		desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-		HRESULT hr = ID3D11Device_CreateBuffer(d3d11_device, &desc, 0, &d3d11_quad_vbo);
-		assert(SUCCEEDED(hr), "CreateBuffer failed");
-		d3d11_quad_vbo_size = required_size;
+		vk_data.vertex_buffer = vk_create_vertex_buffer(required_size);
+		vk_data.vertex_buffer_mem = vk_alloc_buffer_mem(vk_data.vertex_buffer);
+		vk_buffer_set_data(vk_data.vertex_buffer_mem, verts, sizeof(verts[0]) * vert_count); // #TEMPORARY
 		
-		d3d11_staging_quad_buffer = alloc(get_heap_allocator(), d3d11_quad_vbo_size);
-		assert((u64)d3d11_staging_quad_buffer%16 == 0);
+		vk_staging_quad_buffer = alloc(get_heap_allocator(), vk_data.vertex_buffer_size);
+		assert((u64)vk_staging_quad_buffer%16 == 0);
 		
-		log_verbose("Grew quad vbo to %d bytes.", d3d11_quad_vbo_size);
+		log_verbose("Grew quad vbo to %d bytes.", vk_data.vertex_buffer_size);
 	}
 
-	if (draw_frame.num_quads > 0) {
+	if (number_of_quads > 0) {
 		///
 		// Render geometry from into vbo quad list
 	    
-		
+		// TODO: All of this
+		/*
 		ID3D11ShaderResourceView *textures[32];
 		ID3D11ShaderResourceView *last_texture = 0;
 		u64 num_textures = 0;
@@ -1294,11 +1258,16 @@ void d3d11_process_draw_frame() {
 		}
 		
 		///
-		// Draw call
-		tm_scope("Draw call") d3d11_draw_call(number_of_rendered_quads, textures, num_textures);
+		// Draw call*/
+		//tm_scope("Draw call") d3d11_draw_call(number_of_rendered_quads, textures, num_textures);
+		vk_draw_call(0, NULL, 0); // #TEMPORARY
     }
     
-    reset_draw_frame(&draw_frame);
+    draw_frame_reset(&draw_frame);
+}
+
+void gfx_render_draw_frame_to_window(Draw_Frame* frame) {
+	gfx_render_draw_frame(frame, 0);
 }
 
 void gfx_update() {
@@ -1314,26 +1283,26 @@ void gfx_update() {
 	assert(ok, "GetClientRect failed with error code %lu", GetLastError());
 	u32 window_width  = client_rect.right-client_rect.left;
 	u32 window_height = client_rect.bottom-client_rect.top;
-	if (window_width != d3d11_swap_chain_width || window_height != d3d11_swap_chain_height) {
-		d3d11_update_swapchain();
+	if (window_width != vk_swap_chain_width || window_height != vk_swap_chain_height) {
+		vk_update_swapchain();
 	}
 
-	d3d11_process_draw_frame();
-
 	tm_scope("Present") {
-		IDXGISwapChain1_Present(d3d11_swap_chain, window.enable_vsync, window.enable_vsync ? 0 : DXGI_PRESENT_ALLOW_TEARING);
+		gfx_render_draw_frame_to_window(&draw_frame);
+		draw_frame_reset(&draw_frame);
 	}
 	
 	
 #if CONFIGURATION == DEBUG
-	d3d11_output_debug_messages();
+	//d3d11_output_debug_messages();
 #endif
 	
 }
 
+// TODO: Images
 
-void gfx_init_image(Gfx_Image *image, void *initial_data) {
-
+void gfx_init_image(Gfx_Image *image, void *initial_data, bool render_target) {
+	return;/*
 	void *data = initial_data;
     if (!initial_data){
     	// #Incomplete 8 bit width assumed
@@ -1376,9 +1345,10 @@ void gfx_init_image(Gfx_Image *image, void *initial_data) {
 		dealloc(image->allocator, data);
 	}
 	
-	log_verbose("Created a D3D11 image of width %d and height %d.", image->width, image->height);
+	log_verbose("Created a D3D11 image of width %d and height %d.", image->width, image->height);*/
 }
 void gfx_set_image_data(Gfx_Image *image, u32 x, u32 y, u32 w, u32 h, void *data) {
+	return;/*
     assert(image && data, "Bad parameters passed to gfx_set_image_data");
 
     ID3D11ShaderResourceView *view = image->gfx_handle;
@@ -1402,9 +1372,10 @@ void gfx_set_image_data(Gfx_Image *image, u32 x, u32 y, u32 w, u32 h, void *data
     destBox.back = 1;
 
 	// #Incomplete bit-width 8 assumed
-    ID3D11DeviceContext_UpdateSubresource(d3d11_context, (ID3D11Resource*)texture, 0, &destBox, data, w * image->channels, 0);
+    ID3D11DeviceContext_UpdateSubresource(d3d11_context, (ID3D11Resource*)texture, 0, &destBox, data, w * image->channels, 0);*/
 }
 void gfx_deinit_image(Gfx_Image *image) {
+	return;/*
 	ID3D11ShaderResourceView *view = image->gfx_handle;
 	ID3D11Resource *resource = 0;
 	ID3D11ShaderResourceView_GetResource(view, &resource);
@@ -1417,12 +1388,12 @@ void gfx_deinit_image(Gfx_Image *image) {
 		log("Destroyed an image");
 	} else {
 		panic("Unhandled D3D11 resource deletion");
-	}
+	}*/
 }
 
 bool 
 shader_recompile_with_extension(string ext_source, u64 cbuffer_size) {
-	
+	return true;/*
 
 	string source = string_replace_all(STR(d3d11_image_shader_source), STR("$INJECT_PIXEL_POST_PROCESS"), ext_source, get_temporary_allocator());
 	
@@ -1444,12 +1415,12 @@ shader_recompile_with_extension(string ext_source, u64 cbuffer_size) {
 	
 	d3d11_cbuffer_size = cbuffer_size;
 	
-	return true;
+	return true;*/
 }
 
 const u64 vk_image_shader_vert_size = 1080;
-const u8* vk_image_shader_vert = {
-		0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 
+const u8 vk_image_shader_vert[] = {
+	0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 
 	0x0b, 0x00, 0x0d, 0x00, 0x21, 0x00, 0x00, 0x00, 
 	0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00, 
 	0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x06, 0x00, 
@@ -1587,7 +1558,7 @@ const u8* vk_image_shader_vert = {
 };
 
 const u64 vk_image_shader_frag_size = 572;
-const u8* vk_image_shader_frag = {
+const u8 vk_image_shader_frag[] = {
 	0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 
 	0x0b, 0x00, 0x0d, 0x00, 0x13, 0x00, 0x00, 0x00, 
 	0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00, 

@@ -9,7 +9,8 @@
 	typedef ID3D11RenderTargetView * Gfx_Render_Target_Handle;
 	
 #elif GFX_RENDERER == GFX_RENDERER_VULKAN
-	typedef VkInstance * Gfx_Handle;
+	typedef VkImage Gfx_Handle;
+	typedef VkSurfaceKHR Gfx_Render_Target_Handle;
 #elif GFX_RENDERER == GFX_RENDERER_METAL
 	#error "We only have a D3D11 renderer at the moment"
 #else
